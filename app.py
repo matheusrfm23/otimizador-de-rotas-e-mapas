@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.20: Implementada a primeira funcionalidade de IA (Enriquecer Dados).
+# VERSÃO 3.1.20: Corrigido o NameError e implementadas todas as ferramentas de IA.
 
 import streamlit as st
 import pandas as pd
@@ -20,8 +20,9 @@ from src.exporter import (
     export_to_kml, export_to_gpx, generate_google_maps_links,
     export_to_mymaps_csv
 )
-# Importa o módulo de IA
-from src.gemini_services import enrich_data_with_gemini
+from src.gemini_services import (
+    enrich_data_with_gemini, standardize_names_with_gemini, find_duplicates_with_gemini
+)
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -39,7 +40,7 @@ def initialize_session_state():
         "raw_data_for_mapping": None, "manual_mapping_required": False,
         "route_geojson": None, "total_distance": None, "total_duration": None,
         "address_input": "", "clear_address_input_flag": False,
-        "ai_authenticated": False # Para o controlo de senha da IA
+        "ai_authenticated": False
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -81,6 +82,9 @@ def check_ai_password():
 
     try:
         AI_PASSWORD = st.secrets["AI_PASSWORD"]
+        if not AI_PASSWORD: # Se a senha estiver vazia nos secrets, não pede.
+            st.session_state.ai_authenticated = True
+            return True
     except FileNotFoundError:
         st.session_state.ai_authenticated = True
         return True
@@ -148,12 +152,16 @@ def draw_ai_tools_section():
                     st.session_state.processed_data = updated_df
                     st.rerun()
         
-        # (Outros botões de IA serão adicionados aqui)
         with col2:
-            st.button("Padronizar Nomes", use_container_width=True, disabled=True)
+            if st.button("Padronizar Nomes", use_container_width=True, help="Corrige abreviações e erros de digitação nos nomes."):
+                if check_ai_password():
+                    updated_df = standardize_names_with_gemini(st.session_state.processed_data)
+                    st.session_state.processed_data = updated_df
+                    st.rerun()
         with col3:
-            st.button("Verificar Duplicatas", use_container_width=True, disabled=True)
-
+            if st.button("Verificar Duplicatas", use_container_width=True, help="Analisa a lista em busca de pontos duplicados."):
+                 if check_ai_password():
+                    find_duplicates_with_gemini(st.session_state.processed_data)
 
 def draw_add_point_section():
     """Desenha a seção para adicionar um novo ponto à rota."""

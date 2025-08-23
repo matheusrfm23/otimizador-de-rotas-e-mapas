@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.13: Aprimorada a função clean_data para lidar com caracteres especiais.
+# VERSÃO 3.0.13: Reintroduzida a função add_maps_link_column.
 
 import pandas as pd
 import tempfile
@@ -136,6 +136,15 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         axis=1
     )
     return df_clean[valid_coords].reset_index(drop=True)
+
+def add_maps_link_column(df: pd.DataFrame) -> pd.DataFrame:
+    """Adiciona uma coluna com a URL do Google Maps ao DataFrame."""
+    df_with_link = df.copy()
+    if 'Latitude' in df_with_link.columns and 'Longitude' in df_with_link.columns:
+        lat = pd.to_numeric(df_with_link['Latitude'], errors='coerce')
+        lon = pd.to_numeric(df_with_link['Longitude'], errors='coerce')
+        df_with_link['Google Maps'] = "https://www.google.com/maps?q=" + lat.astype(str) + "," + lon.astype(str)
+    return df_with_link
 
 # --- SEÇÃO 3: ORQUESTRADORES DE PROCESSAMENTO ---
 
