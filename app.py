@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.14: Adicionada tela de mapeamento manual e autocomplete interativo.
+# VERSÃO 3.1.17: Implementado o gerenciamento de sessão (adicionar e salvar).
 
 import streamlit as st
 import pandas as pd
@@ -41,7 +41,9 @@ def initialize_session_state():
         "route_geojson": None,
         "total_distance": None,
         "total_duration": None,
-        "address_input": "" # Para controlar o campo de texto do autocomplete
+        "address_input": "",
+        "clear_address_input_flag": False,
+        "pending_sidebar_file": None # Para o ficheiro carregado na barra lateral
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -86,16 +88,32 @@ def draw_sidebar():
         st.header("Opções da Rota")
         if st.button("Reiniciar Sessão", use_container_width=True, type="primary"):
             clear_session()
-        st.markdown("---")
+        
+        # A secção de gestão de sessão só aparece se houver uma rota ativa
         if st.session_state.processed_data is not None:
-            st.subheader("Adicionar à Rota Atual")
+            st.markdown("---")
+            st.subheader("Gerir Sessão")
+            
+            # Botão para salvar a sessão
+            if not st.session_state.processed_data.empty:
+                st.download_button(
+                    label="Salvar Sessão de Trabalho",
+                    data=st.session_state.processed_data.to_csv(index=False).encode('utf-8-sig'),
+                    file_name="sessao_otimizador.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+            # Uploader para adicionar um novo ficheiro
             sidebar_uploader = st.file_uploader(
-                "Carregar novo arquivo na sessão",
+                "Carregar novo ficheiro na sessão",
                 type=["csv", "xlsx", "kml", "gpx"],
                 key="sidebar_uploader"
             )
             if sidebar_uploader:
-                st.success(f"Arquivo {sidebar_uploader.name} carregado!")
+                # Guarda o ficheiro no estado da sessão para ser processado na tela principal
+                st.session_state.pending_sidebar_file = sidebar_uploader
+                st.rerun()
 
 def draw_add_point_section():
     """Desenha a seção para adicionar um novo ponto à rota."""
@@ -107,6 +125,10 @@ def draw_add_point_section():
     except FileNotFoundError:
         ORS_API_KEY = ""
 
+    if st.session_state.clear_address_input_flag:
+        st.session_state.address_input = ""
+        st.session_state.clear_address_input_flag = False
+
     add_mode = st.radio(
         "Método de adição:",
         ("Por Endereço / Link", "Por Coordenadas"),
@@ -115,14 +137,12 @@ def draw_add_point_section():
     )
 
     if add_mode == "Por Endereço / Link":
-        # Usamos o session_state para controlar o valor do campo de texto
         text_input = st.text_input(
             "Digite um endereço, link do Google Maps ou Plus Code",
             placeholder="Ex: Av. Paulista, 1578 ou https://maps.app.goo.gl/...",
             key="address_input"
         )
         
-        # Container para as sugestões clicáveis
         suggestions_container = st.container()
 
         if text_input and "http" not in text_input and not re.search(r"-?\d+\.\d+", text_input):
@@ -130,9 +150,7 @@ def draw_add_point_section():
                 suggestions = autocomplete_address(text_input, ORS_API_KEY)
                 with suggestions_container:
                     for suggestion in suggestions[:3]:
-                        # Cria um botão para cada sugestão
                         if st.button(suggestion, key=f"sug_{suggestion}", use_container_width=True):
-                            # Ao clicar, atualiza o campo de texto e recarrega
                             st.session_state.address_input = suggestion
                             st.rerun()
 
@@ -151,7 +169,7 @@ def draw_add_point_section():
                     lat, lon = coords
                     new_row = pd.DataFrame([{'Nome': point_name, 'Latitude': lat, 'Longitude': lon}])
                     st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
-                    st.session_state.address_input = "" # Limpa o campo de texto
+                    st.session_state.clear_address_input_flag = True
                     st.success("Ponto adicionado com sucesso.")
                     st.rerun()
                 else:
@@ -212,12 +230,33 @@ def draw_optimization_controls():
         ORS_API_KEY = ""
         st.warning("Chave da API do OpenRouteService não encontrada. A otimização online está desabilitada.")
 
+    custom_start_end = st.toggle("Definir partida e chegada personalizadas")
+    
+    start_node = 0
+    end_node = 0
+    if not st.session_state.processed_data.empty:
+        end_node = len(st.session_state.processed_data) - 1
+
+    if custom_start_end and len(st.session_state.processed_data) > 1:
+        df_data = st.session_state.processed_data
+        point_options = [f"{idx}: {row.get('Nome', f'Ponto {idx+1}')}" for idx, row in df_data.iterrows()]
+        
+        col1, col2 = st.columns(2)
+        start_point_str = col1.selectbox("Ponto de Partida", options=point_options, index=0)
+        end_point_str = col2.selectbox("Ponto de Chegada", options=point_options, index=len(point_options)-1)
+        
+        start_node = int(start_point_str.split(':')[0])
+        end_node = int(end_point_str.split(':')[0])
+    
+    elif not custom_start_end:
+        st.caption("A otimização usará o primeiro ponto da tabela como início e o último como fim.")
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Otimizar Rota (Offline)", use_container_width=True, help="Mais rápido, usa distância em linha reta."):
             if len(st.session_state.processed_data) > 1:
                 with st.spinner("Otimizando rota com OR-Tools..."):
-                    optimized_df = ortools_optimizer(st.session_state.processed_data.copy())
+                    optimized_df = ortools_optimizer(st.session_state.processed_data.copy(), start_node=start_node, end_node=end_node)
                     st.session_state.optimized_data = optimized_df
                     st.session_state.route_geojson = None
                     st.session_state.total_distance = None
@@ -230,7 +269,7 @@ def draw_optimization_controls():
         if st.button("Otimizar Rota (Online)", use_container_width=True, type="primary", help="Mais preciso, usa ruas reais.", disabled=(not ORS_API_KEY)):
             if len(st.session_state.processed_data) > 1:
                 with st.spinner("Otimizando rota com a API OpenRouteService..."):
-                    result = optimize_route_online(st.session_state.processed_data.copy(), ORS_API_KEY)
+                    result = optimize_route_online(st.session_state.processed_data.copy(), ORS_API_KEY, start_node=start_node, end_node=end_node)
                     if result:
                         st.session_state.optimized_data = result["data"]
                         st.session_state.route_geojson = result["geojson"]
@@ -311,11 +350,43 @@ def draw_manual_mapping_screen():
         else:
             st.error("Por favor, selecione as colunas de Latitude e Longitude.")
 
+def draw_add_or_replace_dialog():
+    """Desenha o diálogo para adicionar ou substituir a rota atual."""
+    with st.expander("Ficheiro carregado. O que deseja fazer?", expanded=True):
+        pending_file = st.session_state.pending_sidebar_file
+        st.info(f"Você carregou o ficheiro **{pending_file.name}**, mas já existe uma rota com {len(st.session_state.processed_data)} pontos em andamento.")
+        
+        col1, col2 = st.columns(2)
+        
+        if col1.button("Substituir Rota Atual", use_container_width=True):
+            with st.spinner("Processando novo ficheiro..."):
+                result = process_uploaded_file(pending_file)
+                st.session_state.pending_sidebar_file = None # Limpa o ficheiro pendente
+                handle_processed_result(result) # A função já recarrega a página
+
+        if col2.button("Adicionar à Rota Atual", use_container_width=True, type="primary"):
+            with st.spinner("Processando e adicionando novos pontos..."):
+                result = process_uploaded_file(pending_file)
+                if result and result.get('status') == 'success':
+                    new_data = result['data']
+                    st.session_state.processed_data = pd.concat(
+                        [st.session_state.processed_data, new_data], 
+                        ignore_index=True
+                    )
+                    st.success(f"{len(new_data)} novos pontos adicionados com sucesso!")
+                elif result:
+                    st.error(result.get('message', 'Falha ao processar o novo ficheiro.'))
+                
+                st.session_state.pending_sidebar_file = None
+                st.rerun()
 
 def draw_main_content():
     """Desenha o conteúdo principal da página, que muda conforme o estado."""
     
-    if st.session_state.manual_mapping_required:
+    if st.session_state.pending_sidebar_file:
+        draw_add_or_replace_dialog()
+
+    elif st.session_state.manual_mapping_required:
         draw_manual_mapping_screen()
 
     elif st.session_state.processed_data is None:
