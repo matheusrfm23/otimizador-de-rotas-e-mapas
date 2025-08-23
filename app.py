@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.21: Reintroduzida a geração de links do Google Maps na tabela.
+# VERSÃO 3.1.23: Implementada a tela de resolução de divergências.
 
 import streamlit as st
 import pandas as pd
@@ -38,6 +38,7 @@ def initialize_session_state():
     defaults = {
         "processed_data": None, "optimized_data": None,
         "raw_data_for_mapping": None, "manual_mapping_required": False,
+        "divergence_data": None, "show_divergence_screen": False, # Novas variáveis de estado
         "route_geojson": None, "total_distance": None, "total_duration": None,
         "address_input": "", "clear_address_input_flag": False,
         "ai_authenticated": False
@@ -61,16 +62,24 @@ def handle_processed_result(result: dict):
         st.error("O processamento retornou um erro inesperado.")
         return
 
-    if result['status'] == 'success':
+    status = result.get('status')
+    if status == 'success':
         df = result['data']
         st.session_state.processed_data = add_maps_link_column(df)
         st.session_state.manual_mapping_required = False
+        st.session_state.show_divergence_screen = False
         st.success(result.get('message', "Dados processados com sucesso!"))
         st.rerun()
-    elif result['status'] == 'manual_mapping_required':
+    elif status == 'manual_mapping_required':
         st.session_state.raw_data_for_mapping = result['data']
         st.session_state.manual_mapping_required = True
         st.warning(result.get('message', "Mapeamento manual necessário."))
+        st.rerun()
+    elif status == 'divergence_found':
+        st.session_state.processed_data = result['data'] # Guarda os dados brutos
+        st.session_state.divergence_data = result['divergences']
+        st.session_state.show_divergence_screen = True
+        st.warning("Foram encontradas divergências. Por favor, resolva-as abaixo.")
         st.rerun()
     else: # status == 'error'
         st.error(result.get('message', 'Ocorreu um erro desconhecido.'))
@@ -447,11 +456,57 @@ def draw_manual_mapping_screen():
         else:
             st.error("Nenhum ponto válido encontrado com as colunas selecionadas.")
 
+def draw_divergence_resolution_screen():
+    """Desenha a tela para o usuário resolver divergências de coordenadas."""
+    st.header("🚨 Resolver Divergências de Coordenadas")
+    st.markdown("Para os pontos abaixo, escolha qual fonte de coordenadas você deseja usar.")
+
+    with st.form("divergence_form"):
+        choices = {}
+        for item in st.session_state.divergence_data:
+            st.markdown(f"---")
+            st.markdown(f"#### Ponto: **{item['nome']}**")
+            st.markdown(f"Distância entre as fontes: **{item['distancia']:.2f} metros**")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("**Fonte 1: Planilha**")
+                st.write(f"Lat: `{item['coords_planilha'][0]}`")
+                st.write(f"Lon: `{item['coords_planilha'][1]}`")
+                st.markdown(f"[Ver no Mapa](https://www.google.com/maps?q={item['coords_planilha'][0]},{item['coords_planilha'][1]})", unsafe_allow_html=True)
+            with c2:
+                st.markdown("**Fonte 2: Link**")
+                st.write(f"Lat: `{item['coords_link'][0]}`")
+                st.write(f"Lon: `{item['coords_link'][1]}`")
+                st.markdown(f"[Ver no Mapa](https://www.google.com/maps?q={item['coords_link'][0]},{item['coords_link'][1]})", unsafe_allow_html=True)
+            
+            choices[item['index']] = st.radio(
+                "Qual fonte usar?", ('planilha', 'link'), key=f"choice_{item['index']}",
+                horizontal=True, label_visibility="collapsed"
+            )
+        
+        submitted = st.form_submit_button("Aplicar Correções e Continuar")
+        if submitted:
+            df = st.session_state.processed_data.copy()
+            for index, choice in choices.items():
+                if choice == 'link':
+                    divergence_item = next(item for item in st.session_state.divergence_data if item["index"] == index)
+                    df.at[index, 'Latitude'] = divergence_item['coords_link'][0]
+                    df.at[index, 'Longitude'] = divergence_item['coords_link'][1]
+            
+            st.session_state.processed_data = add_maps_link_column(df)
+            st.session_state.divergence_data = None
+            st.session_state.show_divergence_screen = False
+            st.success("Divergências resolvidas com sucesso!")
+            st.rerun()
 
 def draw_main_content():
     """Desenha o conteúdo principal da página, que muda conforme o estado."""
     
-    if st.session_state.manual_mapping_required:
+    if st.session_state.show_divergence_screen:
+        draw_divergence_resolution_screen()
+    
+    elif st.session_state.manual_mapping_required:
         draw_manual_mapping_screen()
 
     elif st.session_state.processed_data is None:

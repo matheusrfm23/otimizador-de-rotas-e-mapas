@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.13: Reintroduzida e corrigida a função add_maps_link_column.
+# VERSÃO 3.0.15: Implementada a lógica de deteção de divergências.
 
 import pandas as pd
 import tempfile
@@ -10,7 +10,7 @@ import requests
 import io
 from lxml import etree
 import gpxpy
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 # Importa a função de cálculo de distância do nosso módulo de utilitários
 from src.utils import haversine_distance
@@ -151,6 +151,30 @@ def add_maps_link_column(df: pd.DataFrame) -> pd.DataFrame:
         df_with_link['Google Maps'] = df_with_link.apply(create_link, axis=1)
     return df_with_link
 
+def _find_divergences(df: pd.DataFrame, threshold_meters: int = 50) -> List[Dict]:
+    """Compara coordenadas de colunas e de links, retornando as divergências."""
+    divergences = []
+    df_copy = df.copy()
+    
+    df_copy['coords_from_link'] = df_copy['Link'].astype(str).apply(extract_coords_from_text)
+    
+    for index, row in df_copy.iterrows():
+        coords_planilha = (row['Latitude'], row['Longitude'])
+        coords_link = row['coords_from_link']
+        
+        if coords_link and _validate_coordinates(coords_planilha[0], coords_planilha[1]):
+            distance = haversine_distance(coords_planilha[0], coords_planilha[1], coords_link[0], coords_link[1])
+            
+            if distance > threshold_meters:
+                divergences.append({
+                    "index": index,
+                    "nome": row.get('Nome', f'Ponto {index + 1}'),
+                    "coords_planilha": coords_planilha,
+                    "coords_link": coords_link,
+                    "distancia": distance
+                })
+    return divergences
+
 # --- SEÇÃO 3: ORQUESTRADORES DE PROCESSAMENTO ---
 
 def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
@@ -179,20 +203,11 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            for col in df_std.columns:
-                if pd.api.types.is_numeric_dtype(df_std[col]): continue
-                
-                coords_series = df_std[col].dropna().astype(str).apply(extract_coords_from_text)
-                if not coords_series.dropna().empty and (coords_series.count() / len(df_std[col].dropna()) > 0.5):
-                    coords_df = pd.DataFrame(coords_series.dropna().tolist(), index=coords_series.dropna().index, columns=['Latitude', 'Longitude'])
-                    df_std = df_std.join(coords_df)
-                    if 'Nome' not in df_std.columns:
-                        try:
-                            name_col = [c for c in df_std.columns if c not in ['Latitude', 'Longitude', col]][0]
-                            df_std.rename(columns={name_col: 'Nome'}, inplace=True)
-                        except IndexError:
-                            df_std['Nome'] = "Ponto"
-                    break
+            if 'Link' in df_std.columns:
+                df_std['coords_from_link'] = df_std['Link'].astype(str).apply(extract_coords_from_text)
+                coords_df = pd.DataFrame(df_std['coords_from_link'].dropna().tolist(), index=df_std.dropna(subset=['coords_from_link']).index)
+                df_std['Latitude'] = coords_df[0]
+                df_std['Longitude'] = coords_df[1]
         
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
             return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as colunas de coordenadas. Por favor, selecione-as manualmente.'}
@@ -201,6 +216,12 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
         
         if df_cleaned.empty:
             return {'status': 'error', 'message': 'Dados encontrados, mas nenhum ponto válido após a limpeza.'}
+        
+        # Verifica por divergências se as colunas necessárias existem
+        if 'Link' in df_std.columns:
+            divergences = _find_divergences(df_cleaned)
+            if divergences:
+                return {'status': 'divergence_found', 'data': df_cleaned, 'divergences': divergences}
         
         return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos processados com sucesso!'}
 
