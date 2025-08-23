@@ -1,17 +1,16 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.8: Implementada a lógica para todas as abas de entrada de dados.
+# VERSÃO 3.1.9: Implementada a funcionalidade de adicionar pontos manualmente.
 
 import streamlit as st
 import pandas as pd
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # --- Importação dos nossos módulos da pasta src ---
-# Adicionadas as novas funções de processamento do data_handler
 from src.data_handler import (
     process_uploaded_file, process_mymaps_link, process_drive_link, 
-    process_raw_text
+    process_raw_text, extract_coords_from_text
 )
 from src.optimizer import ortools_optimizer
 from src.services import optimize_route_online, geocode_address
@@ -58,7 +57,7 @@ def handle_processed_result(result: dict):
     Função central para lidar com o resultado do processamento de dados.
     Atualiza o estado da sessão com base no status do resultado.
     """
-    if not result: # Lida com o caso de um resultado None
+    if not result:
         st.error("O processamento retornou um erro inesperado.")
         return
 
@@ -95,6 +94,69 @@ def draw_sidebar():
             )
             if sidebar_uploader:
                 st.success(f"Arquivo {sidebar_uploader.name} carregado!")
+
+def draw_add_point_section():
+    """Desenha a seção para adicionar um novo ponto à rota."""
+    st.markdown("---")
+    st.subheader("Adicionar Novo Ponto")
+
+    try:
+        ORS_API_KEY = st.secrets["ORS_API_KEY"]
+    except FileNotFoundError:
+        ORS_API_KEY = ""
+
+    add_mode = st.radio(
+        "Método de adição:",
+        ("Por Endereço / Link", "Por Coordenadas"),
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+
+    if add_mode == "Por Endereço / Link":
+        text_input = st.text_input(
+            "Digite um endereço, link do Google Maps ou Plus Code",
+            placeholder="Ex: Av. Paulista, 1578, São Paulo ou https://maps.app.goo.gl/..."
+        )
+        if st.button("Adicionar Ponto", key="add_by_text", disabled=not text_input):
+            with st.spinner("Analisando entrada..."):
+                coords = extract_coords_from_text(text_input)
+                point_name = text_input
+                
+                if not coords:
+                    if not ORS_API_KEY:
+                        st.error("A chave da API do OpenRouteService é necessária para buscar endereços.")
+                        return
+                    coords = geocode_address(text_input, ORS_API_KEY)
+                
+                if coords:
+                    lat, lon = coords
+                    new_row = pd.DataFrame([{'Nome': point_name, 'Latitude': lat, 'Longitude': lon}])
+                    st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+                    st.success("Ponto adicionado com sucesso.")
+                    st.rerun()
+                else:
+                    st.error("Não foi possível encontrar coordenadas para a entrada fornecida.")
+
+    elif add_mode == "Por Coordenadas":
+        c1, c2, c3 = st.columns(3)
+        lat = c1.text_input("Latitude", placeholder="-23.5613")
+        lon = c2.text_input("Longitude", placeholder="-46.6565")
+        name = c3.text_input("Nome (Opcional)", placeholder="MASP")
+        if st.button("Adicionar por Coordenadas", key="add_by_coords"):
+            try:
+                if not lat or not lon:
+                    st.warning("Por favor, insira a Latitude e a Longitude.")
+                    return
+                
+                lat_f = float(str(lat).replace(',', '.'))
+                lon_f = float(str(lon).replace(',', '.'))
+                
+                new_row = pd.DataFrame([{'Nome': name or f"Ponto {lat_f:.4f}, {lon_f:.4f}", 'Latitude': lat_f, 'Longitude': lon_f}])
+                st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+                st.success(f"Ponto '{name}' adicionado.")
+                st.rerun()
+            except (ValueError, TypeError):
+                st.error("Latitude e Longitude devem ser números válidos.")
 
 def draw_optimization_controls():
     """Desenha os botões e a lógica para executar a otimização."""
@@ -271,6 +333,7 @@ def draw_main_content():
                 st.success(f"{len(selected_rows)} ponto(s) apagado(s).")
                 st.rerun()
         
+        draw_add_point_section()
         draw_optimization_controls()
         draw_results_section()
 
@@ -279,6 +342,6 @@ def draw_main_content():
 
 initialize_session_state()
 
-st.title("Otimizador de Rotas e Mapas 3.0 🗺️✨")
+st.title("Otimizador de Rotas e Mapas 3.0 �️✨")
 draw_sidebar()
 draw_main_content()

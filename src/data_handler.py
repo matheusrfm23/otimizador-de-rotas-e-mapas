@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.8: Corrigida a função process_drive_link para ser mais robusta.
+# VERSÃO 3.0.9: Aprimorada a função process_drive_link para lidar com Google Sheets.
 
 import pandas as pd
 import tempfile
@@ -184,21 +184,31 @@ def process_drive_link(url: str) -> Dict[str, Any]:
         file_id = file_id_match.group(1)
         
         session = requests.Session()
-        session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
         
-        download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
-        
-        response = session.get(download_url, stream=True, timeout=15)
-        
-        token = None
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
-                token = value
-                break
-        
-        if token:
-            params = {'id': file_id, 'export': 'download', 'confirm': token}
-            response = session.get('https://drive.google.com/uc', params=params, stream=True, timeout=15)
+        # --- LÓGICA CORRIGIDA ---
+        if "/spreadsheets/" in url:
+            # Usa a URL de exportação específica para Planilhas Google (exportando como CSV)
+            download_url = f'https://docs.google.com/spreadsheets/d/{file_id}/export?format=csv'
+            response = session.get(download_url, stream=True, timeout=15)
+            is_excel = False
+        else:
+            # Usa o método antigo para arquivos normais (CSV, XLSX, etc.) armazenados no Drive
+            download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
+            response = session.get(download_url, stream=True, timeout=15)
+            
+            token = None
+            for key, value in response.cookies.items():
+                if key.startswith('download_warning'):
+                    token = value
+                    break
+            
+            if token:
+                params = {'id': file_id, 'export': 'download', 'confirm': token}
+                response = session.get('https://drive.google.com/uc', params=params, stream=True, timeout=15)
+            
+            content_type = response.headers.get('Content-Type', '')
+            is_excel = "spreadsheet" in content_type or "excel" in content_type
 
         content_type = response.headers.get('Content-Type', '')
         if 'text/html' in content_type:
@@ -210,8 +220,6 @@ def process_drive_link(url: str) -> Dict[str, Any]:
         if not file_content:
              return {'status': 'error', 'message': 'O arquivo do Drive foi baixado, mas está vazio.'}
 
-        is_excel = "/spreadsheets/" in url or "spreadsheet" in content_type
-
         df_raw = _parse_csv_or_excel(file_content, is_excel=is_excel)
 
         if df_raw.empty:
@@ -219,7 +227,17 @@ def process_drive_link(url: str) -> Dict[str, Any]:
         
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
+            # AQUI VAMOS TENTAR EXTRAIR COORDENADAS DOS LINKS ANTES DE DESISTIR
+            if 'Link' in df_std.columns:
+                from src.data_handler import extract_coords_from_text # Importação local para evitar ciclo
+                df_std['coords_from_link'] = df_std['Link'].astype(str).apply(extract_coords_from_text)
+                coords_df = pd.DataFrame(df_std['coords_from_link'].dropna().tolist(), index=df_std.dropna(subset=['coords_from_link']).index)
+                df_std['Latitude'] = coords_df[0]
+                df_std['Longitude'] = coords_df[1]
+
+            # Se ainda assim não tiver, aí sim pedimos o mapeamento manual
+            if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
+                return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
         
         df_cleaned = clean_data(df_std)
         return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos do Drive processados!'}
@@ -250,3 +268,45 @@ def process_raw_text(text_data: str) -> Dict[str, Any]:
 
     except Exception as e:
         return {'status': 'error', 'message': f'Falha ao processar o texto colado: {e}'}
+
+def extract_coords_from_text(text: str) -> Optional[Tuple[float, float]]:
+    """
+    Extrai um par de latitude e longitude de uma string, seja de um link do Google Maps ou texto.
+    """
+    if not isinstance(text, str): return None
+    text = text.strip()
+    
+    # Tenta resolver links curtos do Google Maps primeiro
+    if "maps.app.goo.gl" in text:
+        try:
+            response = requests.head(text, allow_redirects=True, timeout=5)
+            text = response.url
+        except requests.RequestException:
+            pass # Continua com o texto original se a resolução do link falhar
+
+    # Padrão: /@lat,lon,
+    at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", text)
+    if at_match:
+        lat, lon = float(at_match.group(1)), float(at_match.group(2))
+        if _validate_coordinates(lat, lon):
+            return lat, lon
+
+    # Padrão: /data=!3m1!4b1!4m2!3m1!1s0x...
+    # Padrão mais complexo para URLs de place
+    dir_match = re.findall(r"!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)|!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", text)
+    if dir_match:
+        for m in dir_match:
+            # A regex pode capturar em diferentes grupos
+            lat, lon = (m[2], m[3]) if m[2] else (m[1], m[0])
+            lat, lon = float(lat), float(lon)
+            if _validate_coordinates(lat, lon):
+                return lat, lon
+
+    # Padrão: ?q=lat,lon
+    q_match = re.search(r"\?q=(-?\d+\.\d+),(-?\d+\.\d+)", text)
+    if q_match:
+        lat, lon = float(q_match.group(1)), float(q_match.group(2))
+        if _validate_coordinates(lat, lon):
+            return lat, lon
+
+    return None
