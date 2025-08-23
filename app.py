@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.17: Implementado o gerenciamento de sessão (adicionar e salvar).
+# VERSÃO 3.1.19: Adicionados links de navegação e desativada a função de adicionar ficheiro.
 
 import streamlit as st
 import pandas as pd
@@ -43,7 +43,6 @@ def initialize_session_state():
         "total_duration": None,
         "address_input": "",
         "clear_address_input_flag": False,
-        "pending_sidebar_file": None # Para o ficheiro carregado na barra lateral
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -89,12 +88,10 @@ def draw_sidebar():
         if st.button("Reiniciar Sessão", use_container_width=True, type="primary"):
             clear_session()
         
-        # A secção de gestão de sessão só aparece se houver uma rota ativa
         if st.session_state.processed_data is not None:
             st.markdown("---")
             st.subheader("Gerir Sessão")
             
-            # Botão para salvar a sessão
             if not st.session_state.processed_data.empty:
                 st.download_button(
                     label="Salvar Sessão de Trabalho",
@@ -104,16 +101,14 @@ def draw_sidebar():
                     use_container_width=True
                 )
 
-            # Uploader para adicionar um novo ficheiro
-            sidebar_uploader = st.file_uploader(
-                "Carregar novo ficheiro na sessão",
+            # A funcionalidade de adicionar ficheiro a uma sessão existente foi temporariamente desativada.
+            st.file_uploader(
+                "Carregar novo ficheiro (desativado)",
                 type=["csv", "xlsx", "kml", "gpx"],
-                key="sidebar_uploader"
+                key="sidebar_uploader",
+                disabled=True,
+                help="Esta funcionalidade está em manutenção e será reativada em breve."
             )
-            if sidebar_uploader:
-                # Guarda o ficheiro no estado da sessão para ser processado na tela principal
-                st.session_state.pending_sidebar_file = sidebar_uploader
-                st.rerun()
 
 def draw_add_point_section():
     """Desenha a seção para adicionar um novo ponto à rota."""
@@ -281,6 +276,24 @@ def draw_optimization_controls():
             else:
                 st.warning("São necessários pelo menos 2 pontos para otimizar.")
 
+def draw_gmaps_links_section():
+    """Desenha a seção com os links de navegação do Google Maps."""
+    st.subheader("Navegar com Google Maps")
+    gmaps_links = generate_google_maps_links(st.session_state.optimized_data)
+    
+    if not gmaps_links:
+        st.info("Não há pontos suficientes para gerar um link de navegação.")
+        return
+
+    if len(gmaps_links) == 1:
+        st.markdown(f'<a href="{gmaps_links[0]}" target="_blank" style="display:inline-block;padding:0.5em 1em;background-color:#4CAF50;color:white;text-align:center;text-decoration:none;border-radius:4px;">Abrir rota completa no Google Maps</a>', unsafe_allow_html=True)
+    else:
+        st.warning(f"Sua rota com {len(st.session_state.optimized_data)} pontos excede o limite do Google Maps e foi dividida em {len(gmaps_links)} partes.")
+        for i, link in enumerate(gmaps_links):
+            start_point_num = i * 9 + 1
+            end_point_num = min((i * 9) + 10, len(st.session_state.optimized_data))
+            st.markdown(f'**Parte {i+1} (Pontos {start_point_num}–{end_point_num}):** <a href="{link}" target="_blank">Abrir no Google Maps</a>', unsafe_allow_html=True)
+
 def draw_results_section():
     """Desenha a seção de resultados se uma rota otimizada existir."""
     if st.session_state.optimized_data is not None:
@@ -298,6 +311,8 @@ def draw_results_section():
             map_html = create_interactive_map(st.session_state.optimized_data, st.session_state.route_geojson)
             if map_html:
                 st.components.v1.html(map_html, height=600)
+        
+        draw_gmaps_links_section()
         
         st.subheader("Exportar Resultados")
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -350,43 +365,10 @@ def draw_manual_mapping_screen():
         else:
             st.error("Por favor, selecione as colunas de Latitude e Longitude.")
 
-def draw_add_or_replace_dialog():
-    """Desenha o diálogo para adicionar ou substituir a rota atual."""
-    with st.expander("Ficheiro carregado. O que deseja fazer?", expanded=True):
-        pending_file = st.session_state.pending_sidebar_file
-        st.info(f"Você carregou o ficheiro **{pending_file.name}**, mas já existe uma rota com {len(st.session_state.processed_data)} pontos em andamento.")
-        
-        col1, col2 = st.columns(2)
-        
-        if col1.button("Substituir Rota Atual", use_container_width=True):
-            with st.spinner("Processando novo ficheiro..."):
-                result = process_uploaded_file(pending_file)
-                st.session_state.pending_sidebar_file = None # Limpa o ficheiro pendente
-                handle_processed_result(result) # A função já recarrega a página
-
-        if col2.button("Adicionar à Rota Atual", use_container_width=True, type="primary"):
-            with st.spinner("Processando e adicionando novos pontos..."):
-                result = process_uploaded_file(pending_file)
-                if result and result.get('status') == 'success':
-                    new_data = result['data']
-                    st.session_state.processed_data = pd.concat(
-                        [st.session_state.processed_data, new_data], 
-                        ignore_index=True
-                    )
-                    st.success(f"{len(new_data)} novos pontos adicionados com sucesso!")
-                elif result:
-                    st.error(result.get('message', 'Falha ao processar o novo ficheiro.'))
-                
-                st.session_state.pending_sidebar_file = None
-                st.rerun()
-
 def draw_main_content():
     """Desenha o conteúdo principal da página, que muda conforme o estado."""
     
-    if st.session_state.pending_sidebar_file:
-        draw_add_or_replace_dialog()
-
-    elif st.session_state.manual_mapping_required:
+    if st.session_state.manual_mapping_required:
         draw_manual_mapping_screen()
 
     elif st.session_state.processed_data is None:
