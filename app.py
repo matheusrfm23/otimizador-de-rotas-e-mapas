@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.19: Adicionados links de navegação e desativada a função de adicionar ficheiro.
+# VERSÃO 3.1.20: Implementada a primeira funcionalidade de IA (Enriquecer Dados).
 
 import streamlit as st
 import pandas as pd
@@ -20,7 +20,8 @@ from src.exporter import (
     export_to_kml, export_to_gpx, generate_google_maps_links,
     export_to_mymaps_csv
 )
-# (As funções do gemini_services serão importadas quando as usarmos)
+# Importa o módulo de IA
+from src.gemini_services import enrich_data_with_gemini
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -34,15 +35,11 @@ st.set_page_config(
 def initialize_session_state():
     """Define os valores padrão para as variáveis da sessão se elas não existirem."""
     defaults = {
-        "processed_data": None,
-        "optimized_data": None,
-        "raw_data_for_mapping": None,
-        "manual_mapping_required": False,
-        "route_geojson": None,
-        "total_distance": None,
-        "total_duration": None,
-        "address_input": "",
-        "clear_address_input_flag": False,
+        "processed_data": None, "optimized_data": None,
+        "raw_data_for_mapping": None, "manual_mapping_required": False,
+        "route_geojson": None, "total_distance": None, "total_duration": None,
+        "address_input": "", "clear_address_input_flag": False,
+        "ai_authenticated": False # Para o controlo de senha da IA
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -58,7 +55,6 @@ def clear_session():
 def handle_processed_result(result: dict):
     """
     Função central para lidar com o resultado do processamento de dados.
-    Atualiza o estado da sessão com base no status do resultado.
     """
     if not result:
         st.error("O processamento retornou um erro inesperado.")
@@ -78,6 +74,30 @@ def handle_processed_result(result: dict):
         st.error(result.get('message', 'Ocorreu um erro desconhecido.'))
         st.session_state.processed_data = None
 
+def check_ai_password():
+    """Verifica a senha da IA. Retorna True se autenticado, False caso contrário."""
+    if st.session_state.ai_authenticated:
+        return True
+
+    try:
+        AI_PASSWORD = st.secrets["AI_PASSWORD"]
+    except FileNotFoundError:
+        st.session_state.ai_authenticated = True
+        return True
+    
+    @st.dialog("Acesso à IA Requer Senha")
+    def password_dialog():
+        st.write("Para usar as funções de Inteligência Artificial, por favor, insira a senha.")
+        password = st.text_input("Senha", type="password")
+        if st.button("Liberar Acesso"):
+            if password == AI_PASSWORD:
+                st.session_state.ai_authenticated = True
+                st.rerun()
+            else:
+                st.error("Senha incorreta.")
+    
+    password_dialog()
+    return False
 
 # --- FUNÇÕES DE LAYOUT (UI) ---
 
@@ -100,8 +120,6 @@ def draw_sidebar():
                     mime="text/csv",
                     use_container_width=True
                 )
-
-            # A funcionalidade de adicionar ficheiro a uma sessão existente foi temporariamente desativada.
             st.file_uploader(
                 "Carregar novo ficheiro (desativado)",
                 type=["csv", "xlsx", "kml", "gpx"],
@@ -109,6 +127,33 @@ def draw_sidebar():
                 disabled=True,
                 help="Esta funcionalidade está em manutenção e será reativada em breve."
             )
+
+def draw_ai_tools_section():
+    """Desenha a seção com as ferramentas de IA."""
+    try:
+        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    except FileNotFoundError:
+        GEMINI_API_KEY = ""
+
+    with st.expander("✨ Ferramentas de IA (Gemini)"):
+        if not GEMINI_API_KEY:
+            st.warning("Chave da API do Gemini não configurada. As ferramentas de IA estão desabilitadas.")
+            return
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("Enriquecer Dados", use_container_width=True, help="Adiciona Endereço e Categoria aos pontos."):
+                if check_ai_password():
+                    updated_df = enrich_data_with_gemini(st.session_state.processed_data)
+                    st.session_state.processed_data = updated_df
+                    st.rerun()
+        
+        # (Outros botões de IA serão adicionados aqui)
+        with col2:
+            st.button("Padronizar Nomes", use_container_width=True, disabled=True)
+        with col3:
+            st.button("Verificar Duplicatas", use_container_width=True, disabled=True)
+
 
 def draw_add_point_section():
     """Desenha a seção para adicionar um novo ponto à rota."""
@@ -433,6 +478,9 @@ def draw_main_content():
 
     else:
         st.header("2. Revise e Edite sua Rota")
+        
+        draw_ai_tools_section()
+        
         st.markdown("Arraste as linhas para reordenar, clique duas vezes para editar e use as caixas de seleção para apagar pontos.")
         
         df_for_grid = st.session_state.processed_data.copy()

@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.12: Adicionada a detecção de coordenadas baseada em conteúdo.
+# VERSÃO 3.0.13: Aprimorada a função clean_data para lidar com caracteres especiais.
 
 import pandas as pd
 import tempfile
@@ -90,20 +90,16 @@ def _auto_detect_and_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     if rename_map:
         df_copy.rename(columns=rename_map, inplace=True)
     
-    # --- NOVA LÓGICA: DETECÇÃO POR CONTEÚDO ---
     if 'Latitude' not in df_copy.columns or 'Longitude' not in df_copy.columns:
         coord_cols = {}
         for col in df_copy.columns:
-            # Tenta converter a coluna para numérico, ignorando erros
             numeric_col = pd.to_numeric(df_copy[col], errors='coerce').dropna()
             if not numeric_col.empty:
-                # Verifica se os valores estão no intervalo de lat ou lon
                 is_lat = numeric_col.between(-90, 90).all()
                 is_lon = numeric_col.between(-180, 180).all()
                 if is_lat and not is_lon: coord_cols[col] = 'Latitude'
                 elif is_lon and not is_lat: coord_cols[col] = 'Longitude'
 
-        # Se encontrou uma de cada, renomeia
         if 'Latitude' in coord_cols.values() and 'Longitude' in coord_cols.values():
             df_copy.rename(columns={v: k for k, v in coord_cols.items()}, inplace=True)
 
@@ -121,24 +117,25 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     if 'Latitude' not in df.columns or 'Longitude' not in df.columns:
         return pd.DataFrame()
     
-    # Função para limpar caracteres extras das coordenadas antes de converter
+    df_clean = df.copy()
+
     def clean_coord_string(coord):
         if isinstance(coord, str):
             return re.sub(r"[°'\"NnSsOoWwEe\s]", "", coord).replace(',', '.')
         return coord
 
-    df['Latitude'] = df['Latitude'].apply(clean_coord_string)
-    df['Longitude'] = df['Longitude'].apply(clean_coord_string)
+    df_clean['Latitude'] = df_clean['Latitude'].apply(clean_coord_string)
+    df_clean['Longitude'] = df_clean['Longitude'].apply(clean_coord_string)
 
-    df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
-    df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
-    df.dropna(subset=['Latitude', 'Longitude'], inplace=True)
+    df_clean['Latitude'] = pd.to_numeric(df_clean['Latitude'], errors='coerce')
+    df_clean['Longitude'] = pd.to_numeric(df_clean['Longitude'], errors='coerce')
+    df_clean.dropna(subset=['Latitude', 'Longitude'], inplace=True)
     
-    valid_coords = df.apply(
+    valid_coords = df_clean.apply(
         lambda row: _validate_coordinates(row['Latitude'], row['Longitude']), 
         axis=1
     )
-    return df[valid_coords].reset_index(drop=True)
+    return df_clean[valid_coords].reset_index(drop=True)
 
 # --- SEÇÃO 3: ORQUESTRADORES DE PROCESSAMENTO ---
 
@@ -146,7 +143,7 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
     """Orquestra o carregamento de um arquivo, tratando múltiplos formatos."""
     try:
         suffix = os.path.splitext(uploaded_file.name)[1].lower()
-        file_content = uploaded_file.getvalue() # Use getvalue() para compatibilidade
+        file_content = uploaded_file.getvalue()
 
         if suffix == '.gpx': 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".gpx") as tmp_file:

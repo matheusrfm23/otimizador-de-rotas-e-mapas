@@ -1,6 +1,6 @@
 # src/services.py
 # Responsável por interagir com APIs externas, como o OpenRouteService (ORS).
-# VERSÃO 3.0.4: Adicionada a função de autocomplete de endereço.
+# VERSÃO 3.0.5: Adicionada verificação de NaN antes de chamar a API de otimização.
 
 import requests
 import pandas as pd
@@ -14,7 +14,15 @@ def optimize_route_online(df: pd.DataFrame, api_key: str, start_node: int = 0, e
     Otimiza uma rota usando a API do OpenRouteService.
     """
     try:
-        coords = df[["Longitude", "Latitude"]].values.tolist()
+        # --- VERIFICAÇÃO DE SEGURANÇA ---
+        # Garante que não há valores nulos (NaN) nas coordenadas antes de continuar.
+        df_valid = df.dropna(subset=['Latitude', 'Longitude'])
+        if len(df_valid) < 2:
+            print("ERRO: Pontos insuficientes para otimização após remover valores inválidos.")
+            return None
+
+        coords = df_valid[["Longitude", "Latitude"]].values.tolist()
+        
         jobs = [
             {"id": idx, "location": [lon, lat]}
             for idx, (lon, lat) in enumerate(coords)
@@ -34,7 +42,7 @@ def optimize_route_online(df: pd.DataFrame, api_key: str, start_node: int = 0, e
         steps = opt_result["routes"][0]["steps"]
         ordered_job_indices = [s["id"] for s in steps if s['type'] == 'job']
         final_route_indices = [start_node] + ordered_job_indices + [end_node]
-        ordered_df = df.iloc[final_route_indices].reset_index(drop=True)
+        ordered_df = df_valid.iloc[final_route_indices].reset_index(drop=True)
 
         dir_payload = {"coordinates": ordered_df[["Longitude", "Latitude"]].values.tolist()}
         dir_response = requests.post(f"{BASE_URL}/v2/directions/driving-car/geojson", json=dir_payload, headers=headers, timeout=30)
@@ -92,7 +100,7 @@ def autocomplete_address(text: str, api_key: str) -> List[str]:
     try:
         params = {
             "text": text,
-            "focus.point.lon": -43.9333, # Foco em Belo Horizonte para resultados mais relevantes
+            "focus.point.lon": -43.9333,
             "focus.point.lat": -19.9167,
         }
         headers = {"Authorization": api_key}
