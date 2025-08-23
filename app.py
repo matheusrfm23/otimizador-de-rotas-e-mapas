@@ -1,17 +1,17 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.20: Corrigido o NameError e implementadas todas as ferramentas de IA.
+# VERSÃO 3.1.21: Reintroduzida a geração de links do Google Maps na tabela.
 
 import streamlit as st
 import pandas as pd
 import re
-from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # --- Importação dos nossos módulos da pasta src ---
 from src.data_handler import (
     process_uploaded_file, process_mymaps_link, process_drive_link, 
-    process_raw_text, extract_coords_from_text, clean_data
+    process_raw_text, extract_coords_from_text, clean_data, add_maps_link_column
 )
 from src.optimizer import ortools_optimizer
 from src.services import optimize_route_online, geocode_address, autocomplete_address
@@ -62,7 +62,8 @@ def handle_processed_result(result: dict):
         return
 
     if result['status'] == 'success':
-        st.session_state.processed_data = result['data']
+        df = result['data']
+        st.session_state.processed_data = add_maps_link_column(df)
         st.session_state.manual_mapping_required = False
         st.success(result.get('message', "Dados processados com sucesso!"))
         st.rerun()
@@ -82,7 +83,7 @@ def check_ai_password():
 
     try:
         AI_PASSWORD = st.secrets["AI_PASSWORD"]
-        if not AI_PASSWORD: # Se a senha estiver vazia nos secrets, não pede.
+        if not AI_PASSWORD:
             st.session_state.ai_authenticated = True
             return True
     except FileNotFoundError:
@@ -216,7 +217,8 @@ def draw_add_point_section():
                 if coords:
                     lat, lon = coords
                     new_row = pd.DataFrame([{'Nome': point_name, 'Latitude': lat, 'Longitude': lon}])
-                    st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+                    df_updated = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+                    st.session_state.processed_data = add_maps_link_column(df_updated)
                     st.session_state.clear_address_input_flag = True
                     st.success("Ponto adicionado com sucesso.")
                     st.rerun()
@@ -262,7 +264,8 @@ def draw_add_point_section():
 
             point_name = name or f"Ponto {lat:.4f}, {lon:.4f}"
             new_row = pd.DataFrame([{'Nome': point_name, 'Latitude': lat, 'Longitude': lon}])
-            st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+            df_updated = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+            st.session_state.processed_data = add_maps_link_column(df_updated)
             st.success(f"Ponto '{point_name}' adicionado.")
             st.rerun()
 
@@ -305,7 +308,7 @@ def draw_optimization_controls():
             if len(st.session_state.processed_data) > 1:
                 with st.spinner("Otimizando rota com OR-Tools..."):
                     optimized_df = ortools_optimizer(st.session_state.processed_data.copy(), start_node=start_node, end_node=end_node)
-                    st.session_state.optimized_data = optimized_df
+                    st.session_state.optimized_data = add_maps_link_column(optimized_df)
                     st.session_state.route_geojson = None
                     st.session_state.total_distance = None
                     st.session_state.total_duration = None
@@ -319,7 +322,7 @@ def draw_optimization_controls():
                 with st.spinner("Otimizando rota com a API OpenRouteService..."):
                     result = optimize_route_online(st.session_state.processed_data.copy(), ORS_API_KEY, start_node=start_node, end_node=end_node)
                     if result:
-                        st.session_state.optimized_data = result["data"]
+                        st.session_state.optimized_data = add_maps_link_column(result["data"])
                         st.session_state.route_geojson = result["geojson"]
                         st.session_state.total_distance = result["distance"]
                         st.session_state.total_duration = result["duration"]
@@ -408,7 +411,7 @@ def draw_manual_mapping_screen():
             df_cleaned = clean_data(df_mapped)
 
             if not df_cleaned.empty:
-                st.session_state.processed_data = df_cleaned
+                st.session_state.processed_data = add_maps_link_column(df_cleaned)
                 st.session_state.manual_mapping_required = False
                 st.session_state.raw_data_for_mapping = None
                 st.success(f"Mapeamento aplicado! {len(df_cleaned)} pontos válidos encontrados.")
@@ -457,7 +460,7 @@ def draw_main_content():
         with tab3:
             st.markdown("Adicione seus pontos um por um, manualmente.")
             if st.button("Começar Rota Manual", use_container_width=True):
-                st.session_state.processed_data = pd.DataFrame(columns=['Nome', 'Latitude', 'Longitude'])
+                st.session_state.processed_data = add_maps_link_column(pd.DataFrame(columns=['Nome', 'Latitude', 'Longitude']))
                 st.rerun()
 
         with tab4:
@@ -500,6 +503,22 @@ def draw_main_content():
         if not df_for_grid.empty:
             gb.configure_column(df_for_grid.columns[0], rowDrag=True)
         
+        if 'Google Maps' in df_for_grid.columns:
+            cell_renderer = JsCode("""
+                class LinkRenderer {
+                    init(params) {
+                        this.eGui = document.createElement('a');
+                        this.eGui.innerText = 'Abrir no Mapa';
+                        this.eGui.setAttribute('href', params.value);
+                        this.eGui.setAttribute('target', '_blank');
+                    }
+                    getGui() {
+                        return this.eGui;
+                    }
+                }
+            """)
+            gb.configure_column("Google Maps", cellRenderer=cell_renderer, editable=False)
+        
         grid_options = gb.build()
 
         ag_grid_response = AgGrid(
@@ -520,7 +539,7 @@ def draw_main_content():
             if selected_rows:
                 indices_to_drop = [row['_selectedRowNodeInfo']['nodeRowIndex'] for row in selected_rows]
                 df_to_keep = st.session_state.processed_data.drop(indices_to_drop).reset_index(drop=True)
-                st.session_state.processed_data = df_to_keep
+                st.session_state.processed_data = add_maps_link_column(df_to_keep)
                 st.success(f"{len(selected_rows)} ponto(s) apagado(s).")
                 st.rerun()
         
