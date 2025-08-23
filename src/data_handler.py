@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.6: Grande refatoração. Funções quebradas em módulos menores e mais lógicos.
+# VERSÃO 3.0.8: Corrigida a função process_drive_link para ser mais robusta.
 
 import pandas as pd
 import tempfile
@@ -10,7 +10,7 @@ import requests
 import io
 from lxml import etree
 import gpxpy
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple
 
 # Importa a função de cálculo de distância do nosso módulo de utilitários
 from src.utils import haversine_distance
@@ -35,15 +35,13 @@ def _parse_gpx_file(file_path: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 def _parse_kml_tree(tree: etree._ElementTree) -> pd.DataFrame:
-    """Extrai pontos de uma estrutura de árvore KML (usado por KML de arquivo e de URL)."""
+    """Extrai pontos de uma estrutura de árvore KML."""
     points = []
-    # Namespace é um "dicionário" para o KML entender os elementos como 'Placemark'.
     ns = {'kml': 'http://www.opengis.net/kml/2.2'}
     for placemark in tree.xpath('.//kml:Placemark', namespaces=ns):
         name = placemark.findtext('kml:name', default="Ponto KML", namespaces=ns).strip()
         coords_text = placemark.findtext('.//kml:coordinates', default="", namespaces=ns).strip()
         if coords_text:
-            # As coordenadas no KML vêm como "lon,lat,alt"
             coords = coords_text.split(',')
             if len(coords) >= 2:
                 points.append({
@@ -53,24 +51,19 @@ def _parse_kml_tree(tree: etree._ElementTree) -> pd.DataFrame:
                 })
     return pd.DataFrame(points)
 
-def _parse_kml_file(file_path: str) -> pd.DataFrame:
-    """Analisa um arquivo KML a partir de um caminho de arquivo."""
+def _parse_csv_or_excel(file_content: bytes, is_excel: bool) -> pd.DataFrame:
+    """Lê o conteúdo de um arquivo CSV ou XLSX e o retorna como um DataFrame."""
     try:
-        tree = etree.parse(file_path)
-        return _parse_kml_tree(tree)
+        if is_excel:
+            return pd.read_excel(io.BytesIO(file_content))
+        else:
+            try:
+                text_content = file_content.decode('utf-8')
+            except UnicodeDecodeError:
+                text_content = file_content.decode('latin-1')
+            return pd.read_csv(io.StringIO(text_content), on_bad_lines='skip', sep=None, engine='python')
     except Exception as e:
-        print(f"ERRO ao analisar o arquivo KML: {e}")
-        return pd.DataFrame()
-
-def _parse_csv_or_excel(file_path: str) -> pd.DataFrame:
-    """Lê um arquivo CSV ou XLSX e o retorna como um DataFrame."""
-    try:
-        if file_path.endswith('.csv'):
-            return pd.read_csv(file_path, on_bad_lines='skip', sep=None, engine='python')
-        else: # .xlsx
-            return pd.read_excel(file_path)
-    except Exception as e:
-        print(f"ERRO ao ler o arquivo de planilha: {e}")
+        print(f"ERRO ao ler o conteúdo da planilha: {e}")
         return pd.DataFrame()
 
 # --- SEÇÃO 2: LÓGICA DE LIMPEZA E VALIDAÇÃO ---
@@ -92,7 +85,7 @@ def _auto_detect_and_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
                 if kw in df_cols_lower:
                     original_col_name = df_cols_lower[kw]
                     rename_map[original_col_name] = standard_name
-                    break # Para de procurar sinônimos para este nome padrão
+                    break
     if rename_map:
         df.rename(columns=rename_map, inplace=True)
     return df
@@ -102,77 +95,158 @@ def _validate_coordinates(latitude: float, longitude: float) -> bool:
     return -90 <= latitude <= 90 and -180 <= longitude <= 180
 
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Limpa e valida as colunas de coordenadas de um DataFrame.
-    Remove linhas com coordenadas inválidas ou ausentes.
-    """
+    """Limpa e valida as colunas de coordenadas de um DataFrame."""
     if 'Latitude' not in df.columns or 'Longitude' not in df.columns:
-        return pd.DataFrame() # Retorna vazio se as colunas essenciais não existirem
+        return pd.DataFrame()
 
-    # Converte os valores para numérico, tratando erros.
     df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
     df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
-
-    # Remove linhas onde a conversão falhou (resultando em NaT/NaN)
     df.dropna(subset=['Latitude', 'Longitude'], inplace=True)
     
-    # Aplica a validação de limites geográficos
     valid_coords = df.apply(
         lambda row: _validate_coordinates(row['Latitude'], row['Longitude']), 
         axis=1
     )
     return df[valid_coords].reset_index(drop=True)
 
-# --- SEÇÃO 3: ORQUESTRADOR PRINCIPAL ---
+# --- SEÇÃO 3: ORQUESTRADORES DE PROCESSAMENTO ---
 
 def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
-    """
-    Orquestra o carregamento de um arquivo, tratando múltiplos formatos.
-    Esta é a função principal que será chamada pelo app.py.
-    """
+    """Orquestra o carregamento de um arquivo, tratando múltiplos formatos."""
     try:
         suffix = os.path.splitext(uploaded_file.name)[1].lower()
-        
-        # Salva o arquivo temporariamente no disco para que as bibliotecas possam lê-lo
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            tmp_file.write(uploaded_file.getbuffer())
-            file_path = tmp_file.name
+        file_content = uploaded_file.getbuffer()
 
-        # Delega o processamento para a função correta com base na extensão
-        if suffix == '.gpx':
+        if suffix == '.gpx': 
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".gpx") as tmp_file:
+                tmp_file.write(file_content)
+                file_path = tmp_file.name
             df_raw = _parse_gpx_file(file_path)
-        elif suffix == '.kml':
-            df_raw = _parse_kml_file(file_path)
-        elif suffix in ['.csv', '.xlsx']:
-            df_raw = _parse_csv_or_excel(file_path)
-        else:
             os.remove(file_path)
+        elif suffix == '.kml':
+            tree = etree.fromstring(file_content)
+            df_raw = _parse_kml_tree(etree.ElementTree(tree))
+        elif suffix in ['.csv', '.xlsx']: 
+            df_raw = _parse_csv_or_excel(file_content, is_excel=(suffix == '.xlsx'))
+        else:
             return {'status': 'error', 'message': f'Formato de arquivo "{suffix}" não suportado.'}
         
-        os.remove(file_path) # Apaga o arquivo temporário
-
         if df_raw.empty:
             return {'status': 'error', 'message': 'Nenhum dado encontrado no arquivo.'}
 
-        # Padroniza as colunas e limpa os dados
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
-        # Verifica se as colunas de coordenadas existem após a padronização
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            # Se não existirem, o app.py deverá pedir o mapeamento manual
-            return {'status': 'manual_mapping_required', 'data': df_raw}
+            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
 
         df_cleaned = clean_data(df_std)
         
         if df_cleaned.empty:
             return {'status': 'error', 'message': 'Dados encontrados, mas nenhum ponto válido após a limpeza.'}
         
-        return {'status': 'success', 'data': df_cleaned}
+        return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos processados com sucesso!'}
 
     except Exception as e:
-        # Garante que o arquivo temporário seja removido em caso de erro
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)
         return {'status': 'error', 'message': f'Ocorreu um erro inesperado: {e}'}
 
-# ... (As funções de processamento de links e texto serão adicionadas depois) ...
+def process_mymaps_link(url: str) -> Dict[str, Any]:
+    """Baixa e processa os pontos de um link do Google My Maps."""
+    try:
+        mid_match = re.search(r"mid=([a-zA-Z0-9_-]+)", url)
+        if not mid_match:
+            return {'status': 'error', 'message': 'URL do My Maps inválida. Verifique o link.'}
+        
+        mid = mid_match.group(1)
+        kml_url = f"https://www.google.com/maps/d/kml?mid={mid}&forcekml=1"
+        
+        response = requests.get(kml_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        response.raise_for_status()
+
+        tree = etree.fromstring(response.content)
+        df = _parse_kml_tree(etree.ElementTree(tree))
+
+        if df.empty:
+            return {'status': 'error', 'message': 'Nenhum ponto encontrado no mapa. Verifique se o mapa não está vazio e se está público.'}
+
+        df_cleaned = clean_data(df)
+        return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos do My Maps processados!'}
+
+    except Exception as e:
+        return {'status': 'error', 'message': f'Falha ao processar o link do My Maps: {e}'}
+
+def process_drive_link(url: str) -> Dict[str, Any]:
+    """Baixa e processa um arquivo do Google Drive de forma robusta."""
+    try:
+        file_id_match = re.search(r"/d/([a-zA-Z0-9_-]+)", url) or re.search(r"id=([a-zA-Z0-9_-]+)", url)
+        if not file_id_match:
+            return {'status': 'error', 'message': 'URL do Google Drive inválida.'}
+        
+        file_id = file_id_match.group(1)
+        
+        session = requests.Session()
+        session.headers.update({'User-Agent': 'Mozilla/5.0'})
+        
+        download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
+        
+        response = session.get(download_url, stream=True, timeout=15)
+        
+        token = None
+        for key, value in response.cookies.items():
+            if key.startswith('download_warning'):
+                token = value
+                break
+        
+        if token:
+            params = {'id': file_id, 'export': 'download', 'confirm': token}
+            response = session.get('https://drive.google.com/uc', params=params, stream=True, timeout=15)
+
+        content_type = response.headers.get('Content-Type', '')
+        if 'text/html' in content_type:
+            return {'status': 'error', 'message': 'Acesso negado. Verifique se o link do Google Drive está compartilhado como "Qualquer pessoa com o link".'}
+
+        response.raise_for_status()
+        
+        file_content = response.content
+        if not file_content:
+             return {'status': 'error', 'message': 'O arquivo do Drive foi baixado, mas está vazio.'}
+
+        is_excel = "/spreadsheets/" in url or "spreadsheet" in content_type
+
+        df_raw = _parse_csv_or_excel(file_content, is_excel=is_excel)
+
+        if df_raw.empty:
+            return {'status': 'error', 'message': 'O arquivo do Drive está vazio ou em formato não reconhecido.'}
+        
+        df_std = _auto_detect_and_standardize_columns(df_raw.copy())
+        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
+            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
+        
+        df_cleaned = clean_data(df_std)
+        return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos do Drive processados!'}
+
+    except requests.exceptions.RequestException as e:
+        return {'status': 'error', 'message': f'Falha de conexão ao processar o link do Drive: {e}'}
+    except Exception as e:
+        return {'status': 'error', 'message': f'Ocorreu um erro inesperado ao processar o link do Drive: {e}'}
+
+
+def process_raw_text(text_data: str) -> Dict[str, Any]:
+    """Processa dados de uma string de texto (geralmente CSV)."""
+    try:
+        if not text_data.strip():
+            return {'status': 'error', 'message': 'A caixa de texto está vazia.'}
+
+        df_raw = _parse_csv_or_excel(text_data.encode('utf-8'), is_excel=False)
+        
+        if df_raw.empty:
+            return {'status': 'error', 'message': 'O texto está em formato não reconhecido.'}
+
+        df_std = _auto_detect_and_standardize_columns(df_raw.copy())
+        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
+            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
+
+        df_cleaned = clean_data(df_std)
+        return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos do texto processados!'}
+
+    except Exception as e:
+        return {'status': 'error', 'message': f'Falha ao processar o texto colado: {e}'}

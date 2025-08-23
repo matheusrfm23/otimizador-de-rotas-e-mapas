@@ -1,14 +1,18 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.6: Adicionadas abas para múltiplos métodos de entrada de dados.
+# VERSÃO 3.1.8: Implementada a lógica para todas as abas de entrada de dados.
 
 import streamlit as st
 import pandas as pd
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # --- Importação dos nossos módulos da pasta src ---
-from src.data_handler import process_uploaded_file
+# Adicionadas as novas funções de processamento do data_handler
+from src.data_handler import (
+    process_uploaded_file, process_mymaps_link, process_drive_link, 
+    process_raw_text
+)
 from src.optimizer import ortools_optimizer
 from src.services import optimize_route_online, geocode_address
 from src.exporter import (
@@ -54,15 +58,19 @@ def handle_processed_result(result: dict):
     Função central para lidar com o resultado do processamento de dados.
     Atualiza o estado da sessão com base no status do resultado.
     """
+    if not result: # Lida com o caso de um resultado None
+        st.error("O processamento retornou um erro inesperado.")
+        return
+
     if result['status'] == 'success':
         st.session_state.processed_data = result['data']
         st.session_state.manual_mapping_required = False
-        st.success("Arquivo processado com sucesso!")
+        st.success(result.get('message', "Dados processados com sucesso!"))
         st.rerun()
     elif result['status'] == 'manual_mapping_required':
         st.session_state.raw_data_for_mapping = result['data']
         st.session_state.manual_mapping_required = True
-        st.warning("Mapeamento manual necessário. Role para baixo para continuar.")
+        st.warning(result.get('message', "Mapeamento manual necessário."))
         st.rerun()
     else: # status == 'error'
         st.error(result.get('message', 'Ocorreu um erro desconhecido.'))
@@ -170,46 +178,61 @@ def draw_main_content():
         st.header("1. Comece Sua Rota")
         st.markdown("Use uma das opções abaixo para carregar os pontos da sua rota.")
         
-        # --- NOVO: Abas para cada método de entrada ---
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "Carregar Arquivo", "Rota Manual", "Link do My Maps", "Link do Drive", "Colar Texto"
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "Planilha (CSV/XLSX)", "GPS (KML/GPX)", "Rota Manual", "Link do My Maps", "Link do Drive", "Colar Texto"
         ])
         
         with tab1:
-            uploaded_file = st.file_uploader(
-                "Selecione o arquivo do seu dispositivo",
-                type=["csv", "xlsx", "kml", "gpx"],
-                label_visibility="collapsed"
+            st.markdown("✅ **Melhor opção para smartphones.**")
+            spreadsheet_file = st.file_uploader(
+                "Selecione um arquivo CSV ou XLSX", type=["csv", "xlsx"],
+                label_visibility="collapsed", key="spreadsheet_uploader"
             )
-            if uploaded_file:
-                with st.spinner("Analisando e processando seu arquivo..."):
-                    result = process_uploaded_file(uploaded_file)
+            if spreadsheet_file:
+                with st.spinner("Analisando e processando sua planilha..."):
+                    result = process_uploaded_file(spreadsheet_file)
+                    handle_processed_result(result)
+
+        with tab2:
+            st.warning("Pode não apresentar a performance esperada em smartphones.")
+            gps_file = st.file_uploader(
+                "Selecione um arquivo KML ou GPX", type=["kml", "gpx"],
+                label_visibility="collapsed", key="gps_uploader"
+            )
+            if gps_file:
+                with st.spinner("Analisando e processando seu arquivo de GPS..."):
+                    result = process_uploaded_file(gps_file)
                     handle_processed_result(result)
         
-        with tab2:
+        with tab3:
             st.markdown("Adicione seus pontos um por um, manualmente.")
             if st.button("Começar Rota Manual", use_container_width=True):
-                # Cria um DataFrame vazio para iniciar a rota manual
                 st.session_state.processed_data = pd.DataFrame(columns=['Nome', 'Latitude', 'Longitude'])
                 st.rerun()
 
-        with tab3:
-            st.markdown("Cole um link compartilhável do seu mapa no Google My Maps.")
-            mymaps_url = st.text_input("URL do Google My Maps", label_visibility="collapsed")
-            if st.button("Processar Link do My Maps", use_container_width=True):
-                st.info("Funcionalidade em construção.")
-        
         with tab4:
-            st.markdown("Cole um link compartilhável de um arquivo CSV ou XLSX do Google Drive.")
-            drive_url = st.text_input("URL do Google Drive", label_visibility="collapsed")
-            if st.button("Processar Link do Drive", use_container_width=True):
-                st.info("Funcionalidade em construção.")
-
+            st.markdown("Cole um link compartilhável do seu mapa no Google My Maps.")
+            mymaps_url = st.text_input("URL do Google My Maps", label_visibility="collapsed", key="mymaps_url")
+            if st.button("Processar Link do My Maps", use_container_width=True, disabled=not mymaps_url):
+                with st.spinner("Extraindo pontos do My Maps..."):
+                    result = process_mymaps_link(mymaps_url)
+                    handle_processed_result(result)
+        
         with tab5:
+            st.markdown("Cole um link compartilhável de um arquivo CSV ou XLSX do Google Drive.")
+            drive_url = st.text_input("URL do Google Drive", label_visibility="collapsed", key="drive_url")
+            if st.button("Processar Link do Drive", use_container_width=True, disabled=not drive_url):
+                with st.spinner("Baixando e processando arquivo do Google Drive..."):
+                    result = process_drive_link(drive_url)
+                    handle_processed_result(result)
+
+        with tab6:
             st.markdown("Copie os dados de uma planilha (formato CSV) e cole abaixo.")
-            text_data = st.text_area("Cole os dados aqui", height=200, label_visibility="collapsed")
-            if st.button("Processar Texto Colado", use_container_width=True):
-                st.info("Funcionalidade em construção.")
+            text_data = st.text_area("Cole os dados aqui", height=200, label_visibility="collapsed", key="text_data")
+            if st.button("Processar Texto Colado", use_container_width=True, disabled=not text_data):
+                with st.spinner("Processando texto..."):
+                    result = process_raw_text(text_data)
+                    handle_processed_result(result)
 
     else:
         st.header("2. Revise e Edite sua Rota")
