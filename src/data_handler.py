@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.9: Aprimorada a função process_drive_link para lidar com Google Sheets.
+# VERSÃO 3.0.11: A função extract_coords_from_text foi aprimorada para máxima flexibilidade.
 
 import pandas as pd
 import tempfile
@@ -92,7 +92,10 @@ def _auto_detect_and_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def _validate_coordinates(latitude: float, longitude: float) -> bool:
     """Verifica se uma coordenada está dentro dos limites geográficos válidos."""
-    return -90 <= latitude <= 90 and -180 <= longitude <= 180
+    try:
+        return -90 <= float(latitude) <= 90 and -180 <= float(longitude) <= 180
+    except (ValueError, TypeError):
+        return False
 
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """Limpa e valida as colunas de coordenadas de um DataFrame."""
@@ -186,14 +189,11 @@ def process_drive_link(url: str) -> Dict[str, Any]:
         session = requests.Session()
         session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
         
-        # --- LÓGICA CORRIGIDA ---
         if "/spreadsheets/" in url:
-            # Usa a URL de exportação específica para Planilhas Google (exportando como CSV)
             download_url = f'https://docs.google.com/spreadsheets/d/{file_id}/export?format=csv'
             response = session.get(download_url, stream=True, timeout=15)
             is_excel = False
         else:
-            # Usa o método antigo para arquivos normais (CSV, XLSX, etc.) armazenados no Drive
             download_url = f'https://drive.google.com/uc?export=download&id={file_id}'
             response = session.get(download_url, stream=True, timeout=15)
             
@@ -227,15 +227,12 @@ def process_drive_link(url: str) -> Dict[str, Any]:
         
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            # AQUI VAMOS TENTAR EXTRAIR COORDENADAS DOS LINKS ANTES DE DESISTIR
             if 'Link' in df_std.columns:
-                from src.data_handler import extract_coords_from_text # Importação local para evitar ciclo
                 df_std['coords_from_link'] = df_std['Link'].astype(str).apply(extract_coords_from_text)
                 coords_df = pd.DataFrame(df_std['coords_from_link'].dropna().tolist(), index=df_std.dropna(subset=['coords_from_link']).index)
                 df_std['Latitude'] = coords_df[0]
                 df_std['Longitude'] = coords_df[1]
 
-            # Se ainda assim não tiver, aí sim pedimos o mapeamento manual
             if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
                 return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
         
@@ -260,8 +257,23 @@ def process_raw_text(text_data: str) -> Dict[str, Any]:
             return {'status': 'error', 'message': 'O texto está em formato não reconhecido.'}
 
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
+        
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
+            for col in df_std.columns:
+                coords_series = df_std[col].dropna().astype(str).apply(extract_coords_from_text)
+                if coords_series.count() / len(df_std[col].dropna()) > 0.5:
+                    coords_df = pd.DataFrame(coords_series.dropna().tolist(), index=coords_series.dropna().index, columns=['Latitude', 'Longitude'])
+                    df_std = df_std.join(coords_df)
+                    if 'Nome' not in df_std.columns:
+                        try:
+                            name_col = [c for c in df_std.columns if c not in ['Latitude', 'Longitude', col]][0]
+                            df_std.rename(columns={name_col: 'Nome'}, inplace=True)
+                        except IndexError:
+                            df_std['Nome'] = "Ponto"
+                    break
+        
+        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
+            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as coordenadas. Por favor, mapeie manualmente.'}
 
         df_cleaned = clean_data(df_std)
         return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos do texto processados!'}
@@ -271,42 +283,51 @@ def process_raw_text(text_data: str) -> Dict[str, Any]:
 
 def extract_coords_from_text(text: str) -> Optional[Tuple[float, float]]:
     """
-    Extrai um par de latitude e longitude de uma string, seja de um link do Google Maps ou texto.
+    Extrai um par de latitude e longitude de uma string, com alta flexibilidade.
+    Aceita links do Google Maps e vários formatos de texto.
     """
     if not isinstance(text, str): return None
-    text = text.strip()
     
-    # Tenta resolver links curtos do Google Maps primeiro
-    if "maps.app.goo.gl" in text:
+    text_cleaned = text.strip()
+    
+    if "maps.app.goo.gl" in text_cleaned:
         try:
-            response = requests.head(text, allow_redirects=True, timeout=5)
-            text = response.url
+            response = requests.head(text_cleaned, allow_redirects=True, timeout=5)
+            text_cleaned = response.url
         except requests.RequestException:
-            pass # Continua com o texto original se a resolução do link falhar
+            pass
 
-    # Padrão: /@lat,lon,
-    at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", text)
+    # --- LÓGICA DE EXTRAÇÃO APRIMORADA ---
+    # 1. Remove caracteres comuns que atrapalham
+    text_cleaned = re.sub(r"[°'\"()NnSsOoWwEe]", "", text_cleaned)
+    # 2. Encontra todos os números que parecem coordenadas (com sinal e ponto decimal)
+    numbers = re.findall(r"-?\d+\.\d+", text_cleaned)
+    
+    if len(numbers) == 2:
+        try:
+            c1, c2 = float(numbers[0]), float(numbers[1])
+            # Verifica qual é a latitude e qual é a longitude
+            if _validate_coordinates(c1, c2): return c1, c2
+            if _validate_coordinates(c2, c1): return c2, c1
+        except (ValueError, IndexError):
+            pass
+
+    # Lógica antiga para links, como fallback
+    at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", text_cleaned)
     if at_match:
         lat, lon = float(at_match.group(1)), float(at_match.group(2))
-        if _validate_coordinates(lat, lon):
-            return lat, lon
+        if _validate_coordinates(lat, lon): return lat, lon
 
-    # Padrão: /data=!3m1!4b1!4m2!3m1!1s0x...
-    # Padrão mais complexo para URLs de place
-    dir_match = re.findall(r"!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)|!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", text)
+    dir_match = re.findall(r"!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)|!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", text_cleaned)
     if dir_match:
         for m in dir_match:
-            # A regex pode capturar em diferentes grupos
             lat, lon = (m[2], m[3]) if m[2] else (m[1], m[0])
             lat, lon = float(lat), float(lon)
-            if _validate_coordinates(lat, lon):
-                return lat, lon
+            if _validate_coordinates(lat, lon): return lat, lon
 
-    # Padrão: ?q=lat,lon
-    q_match = re.search(r"\?q=(-?\d+\.\d+),(-?\d+\.\d+)", text)
+    q_match = re.search(r"\?q=(-?\d+\.\d+),(-?\d+\.\d+)", text_cleaned)
     if q_match:
         lat, lon = float(q_match.group(1)), float(q_match.group(2))
-        if _validate_coordinates(lat, lon):
-            return lat, lon
+        if _validate_coordinates(lat, lon): return lat, lon
 
     return None

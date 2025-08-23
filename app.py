@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.9: Implementada a funcionalidade de adicionar pontos manualmente.
+# VERSÃO 3.1.11: Adição de pontos por coordenadas agora é mais flexível.
 
 import streamlit as st
 import pandas as pd
@@ -115,7 +115,7 @@ def draw_add_point_section():
     if add_mode == "Por Endereço / Link":
         text_input = st.text_input(
             "Digite um endereço, link do Google Maps ou Plus Code",
-            placeholder="Ex: Av. Paulista, 1578, São Paulo ou https://maps.app.goo.gl/..."
+            placeholder="Ex: Av. Paulista, 1578 ou https://maps.app.goo.gl/..."
         )
         if st.button("Adicionar Ponto", key="add_by_text", disabled=not text_input):
             with st.spinner("Analisando entrada..."):
@@ -138,25 +138,50 @@ def draw_add_point_section():
                     st.error("Não foi possível encontrar coordenadas para a entrada fornecida.")
 
     elif add_mode == "Por Coordenadas":
-        c1, c2, c3 = st.columns(3)
-        lat = c1.text_input("Latitude", placeholder="-23.5613")
-        lon = c2.text_input("Longitude", placeholder="-46.6565")
-        name = c3.text_input("Nome (Opcional)", placeholder="MASP")
+        st.markdown("**Opção 1: Campos Separados**")
+        c1, c2, c3 = st.columns([2, 2, 1])
+        lat_sep = c1.text_input("Latitude", placeholder="-23.5613")
+        lon_sep = c2.text_input("Longitude", placeholder="-46.6565")
+        name_sep = c3.text_input("Nome (Opcional)", key="name_sep")
+
+        st.markdown("**Opção 2: Colar Coordenadas Juntas**")
+        c4, c5 = st.columns([3, 1])
+        coords_combined = c4.text_input("Coordenadas em texto", placeholder="-19.842761°, -43.351048°")
+        name_combined = c5.text_input("Nome (Opcional)", key="name_combined")
+        
         if st.button("Adicionar por Coordenadas", key="add_by_coords"):
-            try:
-                if not lat or not lon:
-                    st.warning("Por favor, insira a Latitude e a Longitude.")
+            lat, lon, name = None, None, None
+            
+            # Prioriza os campos separados
+            if lat_sep and lon_sep:
+                try:
+                    lat = float(str(lat_sep).replace(',', '.'))
+                    lon = float(str(lon_sep).replace(',', '.'))
+                    name = name_sep
+                except (ValueError, TypeError):
+                    st.error("Valores de Latitude e Longitude separados são inválidos.")
                     return
-                
-                lat_f = float(str(lat).replace(',', '.'))
-                lon_f = float(str(lon).replace(',', '.'))
-                
-                new_row = pd.DataFrame([{'Nome': name or f"Ponto {lat_f:.4f}, {lon_f:.4f}", 'Latitude': lat_f, 'Longitude': lon_f}])
-                st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
-                st.success(f"Ponto '{name}' adicionado.")
-                st.rerun()
-            except (ValueError, TypeError):
-                st.error("Latitude e Longitude devem ser números válidos.")
+            
+            # Se os campos separados estiverem vazios, tenta o campo combinado
+            elif coords_combined:
+                coords_result = extract_coords_from_text(coords_combined)
+                if coords_result:
+                    lat, lon = coords_result
+                    name = name_combined
+                else:
+                    st.error("Formato de coordenadas no campo de texto é inválido.")
+                    return
+            
+            else:
+                st.warning("Por favor, preencha os campos de coordenadas.")
+                return
+
+            point_name = name or f"Ponto {lat:.4f}, {lon:.4f}"
+            new_row = pd.DataFrame([{'Nome': point_name, 'Latitude': lat, 'Longitude': lon}])
+            st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+            st.success(f"Ponto '{point_name}' adicionado.")
+            st.rerun()
+
 
 def draw_optimization_controls():
     """Desenha os botões e a lógica para executar a otimização."""
@@ -342,6 +367,6 @@ def draw_main_content():
 
 initialize_session_state()
 
-st.title("Otimizador de Rotas e Mapas 3.0 �️✨")
+st.title("Otimizador de Rotas e Mapas 3.0 🗺️✨")
 draw_sidebar()
 draw_main_content()
