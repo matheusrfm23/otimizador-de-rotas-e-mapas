@@ -1,7 +1,7 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.11: Adição de pontos por coordenadas agora é mais flexível.
+# VERSÃO 3.1.12: Aprimorada a busca de endereço na adição manual de pontos.
 
 import streamlit as st
 import pandas as pd
@@ -152,7 +152,6 @@ def draw_add_point_section():
         if st.button("Adicionar por Coordenadas", key="add_by_coords"):
             lat, lon, name = None, None, None
             
-            # Prioriza os campos separados
             if lat_sep and lon_sep:
                 try:
                     lat = float(str(lat_sep).replace(',', '.'))
@@ -162,7 +161,6 @@ def draw_add_point_section():
                     st.error("Valores de Latitude e Longitude separados são inválidos.")
                     return
             
-            # Se os campos separados estiverem vazios, tenta o campo combinado
             elif coords_combined:
                 coords_result = extract_coords_from_text(coords_combined)
                 if coords_result:

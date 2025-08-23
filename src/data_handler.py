@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.11: A função extract_coords_from_text foi aprimorada para máxima flexibilidade.
+# VERSÃO 3.0.12: Corrigida a lógica de leitura de arquivos de upload locais.
 
 import pandas as pd
 import tempfile
@@ -118,7 +118,7 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
     """Orquestra o carregamento de um arquivo, tratando múltiplos formatos."""
     try:
         suffix = os.path.splitext(uploaded_file.name)[1].lower()
-        file_content = uploaded_file.getbuffer()
+        file_content = uploaded_file.getvalue() # Use getvalue() para compatibilidade
 
         if suffix == '.gpx': 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".gpx") as tmp_file:
@@ -297,22 +297,18 @@ def extract_coords_from_text(text: str) -> Optional[Tuple[float, float]]:
         except requests.RequestException:
             pass
 
-    # --- LÓGICA DE EXTRAÇÃO APRIMORADA ---
-    # 1. Remove caracteres comuns que atrapalham
     text_cleaned = re.sub(r"[°'\"()NnSsOoWwEe]", "", text_cleaned)
-    # 2. Encontra todos os números que parecem coordenadas (com sinal e ponto decimal)
     numbers = re.findall(r"-?\d+\.\d+", text_cleaned)
     
-    if len(numbers) == 2:
+    if len(numbers) >= 2:
         try:
+            # Pega os dois primeiros números encontrados
             c1, c2 = float(numbers[0]), float(numbers[1])
-            # Verifica qual é a latitude e qual é a longitude
             if _validate_coordinates(c1, c2): return c1, c2
             if _validate_coordinates(c2, c1): return c2, c1
         except (ValueError, IndexError):
             pass
 
-    # Lógica antiga para links, como fallback
     at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", text_cleaned)
     if at_match:
         lat, lon = float(at_match.group(1)), float(at_match.group(2))
