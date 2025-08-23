@@ -1,19 +1,20 @@
 # app.py
 # Ponto de entrada principal da aplicação Otimizador de Rotas e Mapas 3.0.
 # Este script utiliza o Streamlit para criar a interface gráfica do usuário.
-# VERSÃO 3.1.12: Aprimorada a busca de endereço na adição manual de pontos.
+# VERSÃO 3.1.14: Adicionada tela de mapeamento manual e autocomplete interativo.
 
 import streamlit as st
 import pandas as pd
+import re
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 # --- Importação dos nossos módulos da pasta src ---
 from src.data_handler import (
     process_uploaded_file, process_mymaps_link, process_drive_link, 
-    process_raw_text, extract_coords_from_text
+    process_raw_text, extract_coords_from_text, clean_data
 )
 from src.optimizer import ortools_optimizer
-from src.services import optimize_route_online, geocode_address
+from src.services import optimize_route_online, geocode_address, autocomplete_address
 from src.exporter import (
     create_interactive_map, export_to_csv, export_to_geojson,
     export_to_kml, export_to_gpx, generate_google_maps_links,
@@ -40,6 +41,7 @@ def initialize_session_state():
         "route_geojson": None,
         "total_distance": None,
         "total_duration": None,
+        "address_input": "" # Para controlar o campo de texto do autocomplete
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -113,10 +115,27 @@ def draw_add_point_section():
     )
 
     if add_mode == "Por Endereço / Link":
+        # Usamos o session_state para controlar o valor do campo de texto
         text_input = st.text_input(
             "Digite um endereço, link do Google Maps ou Plus Code",
-            placeholder="Ex: Av. Paulista, 1578 ou https://maps.app.goo.gl/..."
+            placeholder="Ex: Av. Paulista, 1578 ou https://maps.app.goo.gl/...",
+            key="address_input"
         )
+        
+        # Container para as sugestões clicáveis
+        suggestions_container = st.container()
+
+        if text_input and "http" not in text_input and not re.search(r"-?\d+\.\d+", text_input):
+             if len(text_input) > 3 and ORS_API_KEY:
+                suggestions = autocomplete_address(text_input, ORS_API_KEY)
+                with suggestions_container:
+                    for suggestion in suggestions[:3]:
+                        # Cria um botão para cada sugestão
+                        if st.button(suggestion, key=f"sug_{suggestion}", use_container_width=True):
+                            # Ao clicar, atualiza o campo de texto e recarrega
+                            st.session_state.address_input = suggestion
+                            st.rerun()
+
         if st.button("Adicionar Ponto", key="add_by_text", disabled=not text_input):
             with st.spinner("Analisando entrada..."):
                 coords = extract_coords_from_text(text_input)
@@ -132,6 +151,7 @@ def draw_add_point_section():
                     lat, lon = coords
                     new_row = pd.DataFrame([{'Nome': point_name, 'Latitude': lat, 'Longitude': lon}])
                     st.session_state.processed_data = pd.concat([st.session_state.processed_data, new_row], ignore_index=True)
+                    st.session_state.address_input = "" # Limpa o campo de texto
                     st.success("Ponto adicionado com sucesso.")
                     st.rerun()
                 else:
@@ -255,11 +275,50 @@ def draw_results_section():
         with c5:
             st.download_button("Para My Maps", export_to_mymaps_csv(df_opt), "rota_para_mymaps.csv", use_container_width=True)
 
+def draw_manual_mapping_screen():
+    """Desenha a tela para o usuário mapear as colunas manualmente."""
+    st.header("⚠️ Mapeamento Manual Necessário")
+    st.markdown("Não conseguimos detectar as colunas de coordenadas. Por favor, selecione as colunas corretas abaixo.")
+    
+    df_raw = st.session_state.raw_data_for_mapping
+    st.dataframe(df_raw.head())
+    
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    options = [None] + list(df_raw.columns)
+    
+    lat_col = col1.selectbox("Selecione a coluna de Latitude", options=options)
+    lon_col = col2.selectbox("Selecione a coluna de Longitude", options=options)
+    name_col = col3.selectbox("Selecione a coluna de Nome (Opcional)", options=options)
+
+    if st.button("Aplicar Mapeamento e Continuar"):
+        if lat_col and lon_col:
+            rename_dict = {lat_col: 'Latitude', lon_col: 'Longitude'}
+            if name_col:
+                rename_dict[name_col] = 'Nome'
+            
+            df_mapped = df_raw.rename(columns=rename_dict)
+            df_cleaned = clean_data(df_mapped)
+
+            if not df_cleaned.empty:
+                st.session_state.processed_data = df_cleaned
+                st.session_state.manual_mapping_required = False
+                st.session_state.raw_data_for_mapping = None
+                st.success(f"Mapeamento aplicado! {len(df_cleaned)} pontos válidos encontrados.")
+                st.rerun()
+            else:
+                st.error("Nenhum ponto válido encontrado com as colunas selecionadas.")
+        else:
+            st.error("Por favor, selecione as colunas de Latitude e Longitude.")
+
 
 def draw_main_content():
     """Desenha o conteúdo principal da página, que muda conforme o estado."""
     
-    if st.session_state.processed_data is None:
+    if st.session_state.manual_mapping_required:
+        draw_manual_mapping_screen()
+
+    elif st.session_state.processed_data is None:
         st.header("1. Comece Sua Rota")
         st.markdown("Use uma das opções abaixo para carregar os pontos da sua rota.")
         

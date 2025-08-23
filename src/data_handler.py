@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.12: Corrigida a lógica de leitura de arquivos de upload locais.
+# VERSÃO 3.0.12: Adicionada a detecção de coordenadas baseada em conteúdo.
 
 import pandas as pd
 import tempfile
@@ -70,6 +70,7 @@ def _parse_csv_or_excel(file_content: bytes, is_excel: bool) -> pd.DataFrame:
 
 def _auto_detect_and_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Tenta detetar e padronizar as colunas de Latitude, Longitude, Nome e Link."""
+    df_copy = df.copy()
     rename_map = {}
     keywords = {
         'Latitude': ['latitude', 'lat'],
@@ -77,18 +78,36 @@ def _auto_detect_and_standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         'Nome': ['nome', 'name', 'título', 'ref', 'ponto', 'local', 'referencia'],
         'Link': ['link', 'url', 'gmaps', 'maps']
     }
-    df_cols_lower = {c.lower(): c for c in df.columns}
+    df_cols_lower = {str(c).lower(): c for c in df_copy.columns}
     
     for standard_name, kws in keywords.items():
-        if standard_name not in df.columns:
+        if standard_name not in df_copy.columns:
             for kw in kws:
                 if kw in df_cols_lower:
                     original_col_name = df_cols_lower[kw]
                     rename_map[original_col_name] = standard_name
                     break
     if rename_map:
-        df.rename(columns=rename_map, inplace=True)
-    return df
+        df_copy.rename(columns=rename_map, inplace=True)
+    
+    # --- NOVA LÓGICA: DETECÇÃO POR CONTEÚDO ---
+    if 'Latitude' not in df_copy.columns or 'Longitude' not in df_copy.columns:
+        coord_cols = {}
+        for col in df_copy.columns:
+            # Tenta converter a coluna para numérico, ignorando erros
+            numeric_col = pd.to_numeric(df_copy[col], errors='coerce').dropna()
+            if not numeric_col.empty:
+                # Verifica se os valores estão no intervalo de lat ou lon
+                is_lat = numeric_col.between(-90, 90).all()
+                is_lon = numeric_col.between(-180, 180).all()
+                if is_lat and not is_lon: coord_cols[col] = 'Latitude'
+                elif is_lon and not is_lat: coord_cols[col] = 'Longitude'
+
+        # Se encontrou uma de cada, renomeia
+        if 'Latitude' in coord_cols.values() and 'Longitude' in coord_cols.values():
+            df_copy.rename(columns={v: k for k, v in coord_cols.items()}, inplace=True)
+
+    return df_copy
 
 def _validate_coordinates(latitude: float, longitude: float) -> bool:
     """Verifica se uma coordenada está dentro dos limites geográficos válidos."""
@@ -101,6 +120,15 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """Limpa e valida as colunas de coordenadas de um DataFrame."""
     if 'Latitude' not in df.columns or 'Longitude' not in df.columns:
         return pd.DataFrame()
+    
+    # Função para limpar caracteres extras das coordenadas antes de converter
+    def clean_coord_string(coord):
+        if isinstance(coord, str):
+            return re.sub(r"[°'\"NnSsOoWwEe\s]", "", coord).replace(',', '.')
+        return coord
+
+    df['Latitude'] = df['Latitude'].apply(clean_coord_string)
+    df['Longitude'] = df['Longitude'].apply(clean_coord_string)
 
     df['Latitude'] = pd.to_numeric(df['Latitude'], errors='coerce')
     df['Longitude'] = pd.to_numeric(df['Longitude'], errors='coerce')
@@ -140,7 +168,7 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
+            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as colunas de coordenadas. Por favor, selecione-as manualmente.'}
 
         df_cleaned = clean_data(df_std)
         
@@ -302,7 +330,6 @@ def extract_coords_from_text(text: str) -> Optional[Tuple[float, float]]:
     
     if len(numbers) >= 2:
         try:
-            # Pega os dois primeiros números encontrados
             c1, c2 = float(numbers[0]), float(numbers[1])
             if _validate_coordinates(c1, c2): return c1, c2
             if _validate_coordinates(c2, c1): return c2, c1
