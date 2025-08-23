@@ -1,6 +1,6 @@
 # src/data_handler.py
 # Responsável por carregar, analisar, limpar e processar os dados de entrada.
-# VERSÃO 3.0.14: Aprimorada a deteção automática de coordenadas a partir do conteúdo das colunas.
+# VERSÃO 3.0.13: Reintroduzida e corrigida a função add_maps_link_column.
 
 import pandas as pd
 import tempfile
@@ -179,7 +179,6 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            # Tenta encontrar uma única coluna que contenha as coordenadas
             for col in df_std.columns:
                 if pd.api.types.is_numeric_dtype(df_std[col]): continue
                 

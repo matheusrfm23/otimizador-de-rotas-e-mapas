@@ -394,32 +394,59 @@ def draw_manual_mapping_screen():
     st.dataframe(df_raw.head())
     
     st.markdown("---")
+    st.markdown("**Opção 1: Mapear colunas separadas**")
     col1, col2, col3 = st.columns(3)
     options = [None] + list(df_raw.columns)
     
-    lat_col = col1.selectbox("Selecione a coluna de Latitude", options=options)
-    lon_col = col2.selectbox("Selecione a coluna de Longitude", options=options)
-    name_col = col3.selectbox("Selecione a coluna de Nome (Opcional)", options=options)
+    lat_col = col1.selectbox("Selecione a coluna de Latitude", options=options, key="lat_col_sep")
+    lon_col = col2.selectbox("Selecione a coluna de Longitude", options=options, key="lon_col_sep")
+    name_col = col3.selectbox("Selecione a coluna de Nome (Opcional)", options=options, key="name_col_sep")
+
+    st.markdown("---")
+    st.markdown("**Opção 2: Extrair de uma única coluna (links ou coordenadas juntas)**")
+    single_col = st.selectbox("Selecione a coluna que contém as coordenadas ou links", options=options, key="single_col")
 
     if st.button("Aplicar Mapeamento e Continuar"):
+        df_mapped = df_raw.copy()
+        
         if lat_col and lon_col:
             rename_dict = {lat_col: 'Latitude', lon_col: 'Longitude'}
             if name_col:
                 rename_dict[name_col] = 'Nome'
-            
-            df_mapped = df_raw.rename(columns=rename_dict)
-            df_cleaned = clean_data(df_mapped)
+            df_mapped.rename(columns=rename_dict, inplace=True)
 
-            if not df_cleaned.empty:
-                st.session_state.processed_data = add_maps_link_column(df_cleaned)
-                st.session_state.manual_mapping_required = False
-                st.session_state.raw_data_for_mapping = None
-                st.success(f"Mapeamento aplicado! {len(df_cleaned)} pontos válidos encontrados.")
-                st.rerun()
-            else:
-                st.error("Nenhum ponto válido encontrado com as colunas selecionadas.")
+        elif single_col:
+            coords_series = df_mapped[single_col].dropna().astype(str).apply(extract_coords_from_text)
+            if coords_series.dropna().empty:
+                st.error("Nenhuma coordenada válida encontrada na coluna selecionada.")
+                return
+            
+            coords_df = pd.DataFrame(coords_series.dropna().tolist(), index=coords_series.dropna().index, columns=['Latitude', 'Longitude'])
+            df_mapped = df_mapped.join(coords_df)
+            
+            if not name_col:
+                try:
+                    name_col_auto = [c for c in df_mapped.columns if c not in ['Latitude', 'Longitude', single_col]][0]
+                    df_mapped.rename(columns={name_col_auto: 'Nome'}, inplace=True)
+                except IndexError:
+                    df_mapped['Nome'] = "Ponto"
+            elif name_col:
+                 df_mapped.rename(columns={name_col: 'Nome'}, inplace=True)
+
         else:
-            st.error("Por favor, selecione as colunas de Latitude e Longitude.")
+            st.error("Por favor, selecione as colunas de Latitude e Longitude (Opção 1) ou uma única coluna (Opção 2).")
+            return
+
+        df_cleaned = clean_data(df_mapped)
+        if not df_cleaned.empty:
+            st.session_state.processed_data = add_maps_link_column(df_cleaned)
+            st.session_state.manual_mapping_required = False
+            st.session_state.raw_data_for_mapping = None
+            st.success(f"Mapeamento aplicado! {len(df_cleaned)} pontos válidos encontrados.")
+            st.rerun()
+        else:
+            st.error("Nenhum ponto válido encontrado com as colunas selecionadas.")
+
 
 def draw_main_content():
     """Desenha o conteúdo principal da página, que muda conforme o estado."""
