@@ -23,6 +23,7 @@ from src.exporter import (
 from src.gemini_services import (
     enrich_data_with_gemini, standardize_names_with_gemini, find_duplicates_with_gemini
 )
+from src.utils import get_api_keys
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -38,14 +39,18 @@ def initialize_session_state():
     defaults = {
         "processed_data": None, "optimized_data": None,
         "raw_data_for_mapping": None, "manual_mapping_required": False,
-        "divergence_data": None, "show_divergence_screen": False, # Novas variáveis de estado
+        "divergence_data": None, "show_divergence_screen": False,
         "route_geojson": None, "total_distance": None, "total_duration": None,
         "address_input": "", "clear_address_input_flag": False,
-        "ai_authenticated": False
+        "ai_authenticated": False,
+        "api_keys": None
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    if st.session_state.api_keys is None:
+        st.session_state.api_keys = get_api_keys()
 
 def clear_session():
     """Limpa todos os dados da sessão para reiniciar o processo."""
@@ -90,12 +95,8 @@ def check_ai_password():
     if st.session_state.ai_authenticated:
         return True
 
-    try:
-        AI_PASSWORD = st.secrets["AI_PASSWORD"]
-        if not AI_PASSWORD:
-            st.session_state.ai_authenticated = True
-            return True
-    except FileNotFoundError:
+    AI_PASSWORD = st.session_state.api_keys.get("AI_PASSWORD")
+    if not AI_PASSWORD:
         st.session_state.ai_authenticated = True
         return True
     
@@ -144,10 +145,8 @@ def draw_sidebar():
 
 def draw_ai_tools_section():
     """Desenha a seção com as ferramentas de IA."""
-    try:
-        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    except FileNotFoundError:
-        GEMINI_API_KEY = ""
+    api_keys = st.session_state.api_keys
+    GEMINI_API_KEY = api_keys.get("GEMINI_API_KEY")
 
     with st.expander("✨ Ferramentas de IA (Gemini)"):
         if not GEMINI_API_KEY:
@@ -158,30 +157,27 @@ def draw_ai_tools_section():
         with col1:
             if st.button("Enriquecer Dados", use_container_width=True, help="Adiciona Endereço e Categoria aos pontos."):
                 if check_ai_password():
-                    updated_df = enrich_data_with_gemini(st.session_state.processed_data)
+                    updated_df = enrich_data_with_gemini(st.session_state.processed_data, GEMINI_API_KEY)
                     st.session_state.processed_data = updated_df
                     st.rerun()
         
         with col2:
             if st.button("Padronizar Nomes", use_container_width=True, help="Corrige abreviações e erros de digitação nos nomes."):
                 if check_ai_password():
-                    updated_df = standardize_names_with_gemini(st.session_state.processed_data)
+                    updated_df = standardize_names_with_gemini(st.session_state.processed_data, GEMINI_API_KEY)
                     st.session_state.processed_data = updated_df
                     st.rerun()
         with col3:
             if st.button("Verificar Duplicatas", use_container_width=True, help="Analisa a lista em busca de pontos duplicados."):
                  if check_ai_password():
-                    find_duplicates_with_gemini(st.session_state.processed_data)
+                    find_duplicates_with_gemini(st.session_state.processed_data, GEMINI_API_KEY)
 
 def draw_add_point_section():
     """Desenha a seção para adicionar um novo ponto à rota."""
     st.markdown("---")
     st.subheader("Adicionar Novo Ponto")
 
-    try:
-        ORS_API_KEY = st.secrets["ORS_API_KEY"]
-    except FileNotFoundError:
-        ORS_API_KEY = ""
+    ORS_API_KEY = st.session_state.api_keys.get("ORS_API_KEY")
 
     if st.session_state.clear_address_input_flag:
         st.session_state.address_input = ""
@@ -284,10 +280,8 @@ def draw_optimization_controls():
     st.markdown("---")
     st.subheader("Executar Otimização")
 
-    try:
-        ORS_API_KEY = st.secrets["ORS_API_KEY"]
-    except FileNotFoundError:
-        ORS_API_KEY = ""
+    ORS_API_KEY = st.session_state.api_keys.get("ORS_API_KEY")
+    if not ORS_API_KEY:
         st.warning("Chave da API do OpenRouteService não encontrada. A otimização online está desabilitada.")
 
     custom_start_end = st.toggle("Definir partida e chegada personalizadas")

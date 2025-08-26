@@ -1,26 +1,31 @@
 # src/gemini_services.py
 # Módulo para todas as interações com a API do Google Gemini.
-# VERSÃO 3.0.6: Adicionadas todas as funcionalidades de IA.
+# VERSÃO 3.1.0: Refatoradas funções de IA para processamento em lote.
 
 import google.generativeai as genai
 import pandas as pd
 import streamlit as st
 import json
 import time
+import math
 
 # Importa a função de cálculo de distância do nosso módulo de utilitários
 from src.utils import haversine_distance
+# Importa as configurações centralizadas
+from src.config import GEMINI_MODEL_NAME
 
 # --- CONFIGURAÇÃO E FUNÇÕES AUXILIARES ---
 
-def configure_gemini() -> bool:
+# Define um tamanho de lote para as chamadas de API
+BATCH_SIZE = 10
+
+def configure_gemini(api_key: str) -> bool:
     """
-    Configura a API do Gemini com a chave dos secrets do Streamlit.
+    Configura a API do Gemini com a chave fornecida.
     """
     try:
-        api_key = st.secrets.get("GEMINI_API_KEY")
         if not api_key:
-            print("ERRO: Chave da API do Gemini não encontrada nos secrets.")
+            print("ERRO: A chave da API do Gemini não foi fornecida.")
             return False
         genai.configure(api_key=api_key)
         return True
@@ -28,20 +33,26 @@ def configure_gemini() -> bool:
         print(f"ERRO: Falha ao configurar a API do Gemini: {e}")
         return False
 
-def _call_gemini_api(prompt: str, retries: int = 3, delay: int = 5) -> str:
+def _call_gemini_api(prompt: str, api_key: str, retries: int = 3, delay: int = 5) -> str:
     """
     Função centralizada e robusta para chamar a API do Gemini.
     Implementa retentativas em caso de falha.
     """
-    if not configure_gemini():
+    if not configure_gemini(api_key):
         raise ConnectionError("Falha ao configurar a API do Gemini. Verifique a chave.")
 
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel(GEMINI_MODEL_NAME)
     
     for attempt in range(retries):
         try:
             response = model.generate_content(prompt)
-            json_text = response.text.strip().replace("```json", "").replace("```", "")
+            # Limpeza aprimorada para extrair o JSON de dentro do texto de resposta
+            json_text = response.text.strip()
+            if json_text.startswith("```json"):
+                json_text = json_text[7:]
+            if json_text.endswith("```"):
+                json_text = json_text[:-3]
+            json_text = json_text.strip()
             return json_text
         except Exception as e:
             print(f"ERRO na API do Gemini (tentativa {attempt + 1}/{retries}): {e}")
@@ -52,9 +63,9 @@ def _call_gemini_api(prompt: str, retries: int = 3, delay: int = 5) -> str:
 
 # --- FUNÇÕES DE IA PARA A APLICAÇÃO ---
 
-def enrich_data_with_gemini(df: pd.DataFrame) -> pd.DataFrame:
+def enrich_data_with_gemini(df: pd.DataFrame, api_key: str) -> pd.DataFrame:
     """
-    Usa a IA do Gemini para adicionar informações de endereço e categoria aos pontos.
+    Usa a IA do Gemini para adicionar informações de endereço e categoria aos pontos em lotes.
     """
     df_copy = df.copy()
     if 'Endereço' not in df_copy.columns:
@@ -62,74 +73,130 @@ def enrich_data_with_gemini(df: pd.DataFrame) -> pd.DataFrame:
     if 'Categoria' not in df_copy.columns:
         df_copy['Categoria'] = ""
 
-    progress_bar = st.progress(0, text="A IA está a enriquecer os seus dados...")
     total_rows = len(df_copy)
+    progress_bar = st.progress(0, text="A IA está a enriquecer os seus dados (em lotes)...")
 
-    for index, row in df_copy.iterrows():
+    for i in range(0, total_rows, BATCH_SIZE):
+        batch = df_copy.iloc[i:i+BATCH_SIZE]
+
+        # Cria uma lista de dicionários para o prompt
+        points_to_process = []
+        for index, row in batch.iterrows():
+            points_to_process.append({
+                "id": index,
+                "nome": row['Nome'],
+                "latitude": row['Latitude'],
+                "longitude": row['Longitude']
+            })
+
         try:
             prompt = f"""
-            Analise o seguinte local:
-            - Nome: "{row['Nome']}"
-            - Latitude: {row['Latitude']}
-            - Longitude: {row['Longitude']}
-            Com base nesses dados, forneça o endereço completo mais provável e uma 
-            categoria para este local (Ex: Serviço Público, Comércio, Ponto Turístico, 
-            Residencial, Outro).
-            Responda APENAS com um objeto JSON contendo as chaves "endereco" e "categoria".
-            Exemplo: {{"endereco": "Praça Sete de Setembro, s/n - Centro, Belo Horizonte - MG, 30130-010, Brasil", "categoria": "Ponto Turístico"}}
+            Analise a lista de locais JSON a seguir. Para cada local, forneça o endereço
+            completo mais provável e uma categoria (Ex: Serviço Público, Comércio,
+            Ponto Turístico, Residencial, Outro).
+
+            Locais:
+            {json.dumps(points_to_process, indent=2)}
+
+            Responda APENAS com um array JSON, onde cada objeto contém o "id" original,
+            e as chaves "endereco" e "categoria" que você encontrou.
+            Exemplo de resposta:
+            [
+              {{
+                "id": 0,
+                "endereco": "Praça Sete de Setembro, s/n - Centro, Belo Horizonte - MG, 30130-010, Brasil",
+                "categoria": "Ponto Turístico"
+              }},
+              {{
+                "id": 1,
+                "endereco": "Av. Afonso Pena, 1500 - Centro, Belo Horizonte - MG, 30130-005, Brasil",
+                "categoria": "Serviço Público"
+              }}
+            ]
             """
-            json_text = _call_gemini_api(prompt)
-            data = json.loads(json_text)
+            json_text = _call_gemini_api(prompt, api_key)
+            results = json.loads(json_text)
             
-            df_copy.at[index, 'Endereço'] = data.get("endereco", "Não encontrado")
-            df_copy.at[index, 'Categoria'] = data.get("categoria", "Não definida")
+            for result in results:
+                idx = result.get("id")
+                if idx is not None and idx in df_copy.index:
+                    df_copy.at[idx, 'Endereço'] = result.get("endereco", "Não encontrado")
+                    df_copy.at[idx, 'Categoria'] = result.get("categoria", "Não definida")
             
         except Exception as e:
-            print(f"ERRO ao enriquecer a linha {index}: {e}")
-            df_copy.at[index, 'Endereço'] = "Erro na busca"
-            df_copy.at[index, 'Categoria'] = "Erro na busca"
+            print(f"ERRO ao enriquecer o lote a partir do índice {i}: {e}")
+            # Em caso de erro no lote, marca todos os itens do lote como erro
+            for index in batch.index:
+                df_copy.at[index, 'Endereço'] = "Erro na busca em lote"
+                df_copy.at[index, 'Categoria'] = "Erro na busca em lote"
         
-        progress_bar.progress((index + 1) / total_rows, text=f"Processando: {row.get('Nome', '')}")
+        processed_count = min(i + BATCH_SIZE, total_rows)
+        progress_bar.progress(processed_count / total_rows, text=f"Processando: {processed_count}/{total_rows} pontos")
 
     progress_bar.empty()
     st.success("Dados enriquecidos com sucesso!")
     return df_copy
 
-def standardize_names_with_gemini(df: pd.DataFrame) -> pd.DataFrame:
+def standardize_names_with_gemini(df: pd.DataFrame, api_key: str) -> pd.DataFrame:
     """
-    Usa a IA do Gemini para padronizar os nomes dos locais.
+    Usa a IA do Gemini para padronizar os nomes dos locais em lotes.
     """
     df_copy = df.copy()
-    progress_bar = st.progress(0, text="A IA está a padronizar os nomes...")
     total_rows = len(df_copy)
+    progress_bar = st.progress(0, text="A IA está a padronizar os nomes (em lotes)...")
 
-    for index, row in df_copy.iterrows():
+    for i in range(0, total_rows, BATCH_SIZE):
+        batch = df_copy.iloc[i:i+BATCH_SIZE]
+
+        names_to_process = []
+        for index, row in batch.iterrows():
+            names_to_process.append({"id": index, "nome_original": row['Nome']})
+
         try:
             prompt = f"""
-            Analise o seguinte nome de local: "{row['Nome']}".
-            Padronize este nome para um formato completo e oficial. Corrija erros 
-            de digitação e expanda abreviações (como Av. para Avenida, R. para Rua).
-            Responda APENAS com um objeto JSON contendo a chave "nome_padronizado".
-            Exemplo para "Pça Sete": {{"nome_padronizado": "Praça Sete de Setembro"}}
+            Analise a lista de nomes de locais a seguir. Para cada um, padronize o nome para
+            um formato completo e oficial, corrigindo erros de digitação e expandindo
+            abreviações (como Av. para Avenida, R. para Rua).
+
+            Nomes:
+            {json.dumps(names_to_process, indent=2)}
+
+            Responda APENAS com um array JSON, onde cada objeto contém o "id" original
+            e a chave "nome_padronizado".
+            Exemplo de resposta:
+            [
+              {{
+                "id": 0,
+                "nome_padronizado": "Praça Sete de Setembro"
+              }},
+              {{
+                "id": 1,
+                "nome_padronizado": "Avenida Afonso Pena"
+              }}
+            ]
             """
-            json_text = _call_gemini_api(prompt)
-            data = json.loads(json_text)
-            
-            standardized_name = data.get("nome_padronizado")
-            if standardized_name:
-                df_copy.at[index, 'Nome'] = standardized_name
+            json_text = _call_gemini_api(prompt, api_key)
+            results = json.loads(json_text)
+
+            for result in results:
+                idx = result.get("id")
+                standardized_name = result.get("nome_padronizado")
+                if idx is not None and standardized_name and idx in df_copy.index:
+                    df_copy.at[idx, 'Nome'] = standardized_name
                 
         except Exception as e:
-            print(f"ERRO ao padronizar o nome na linha {index}: {e}")
-        
-        progress_bar.progress((index + 1) / total_rows, text=f"Padronizando: {row.get('Nome', '')}")
+            print(f"ERRO ao padronizar o lote a partir do índice {i}: {e}")
+
+        processed_count = min(i + BATCH_SIZE, total_rows)
+        progress_bar.progress(processed_count / total_rows, text=f"Padronizando: {processed_count}/{total_rows} nomes")
 
     progress_bar.empty()
     st.success("Nomes padronizados com sucesso!")
     return df_copy
 
+
 @st.dialog("Análise de Duplicatas")
-def find_duplicates_with_gemini(df: pd.DataFrame):
+def find_duplicates_with_gemini(df: pd.DataFrame, api_key: str):
     """
     Usa a IA do Gemini para encontrar pontos duplicados e mostra o resultado num diálogo.
     """
@@ -137,6 +204,7 @@ def find_duplicates_with_gemini(df: pd.DataFrame):
     df_copy = df.reset_index().rename(columns={'index': 'original_index'})
 
     with st.spinner("Verificando duplicatas com IA... Isso pode levar um tempo."):
+        # A lógica de comparação par a par é mantida, pois a criação de lotes aqui é mais complexa.
         for i in range(len(df_copy)):
             for j in range(i + 1, len(df_copy)):
                 point1 = df_copy.iloc[i]
@@ -155,7 +223,7 @@ def find_duplicates_with_gemini(df: pd.DataFrame):
                         Eles provavelmente se referem ao mesmo local do mundo real? Considere nomes similares.
                         Responda APENAS com um objeto JSON contendo as chaves "is_duplicate" (boolean) e "reason" (string).
                         """
-                        json_text = _call_gemini_api(prompt)
+                        json_text = _call_gemini_api(prompt, api_key)
                         data = json.loads(json_text)
 
                         if data.get("is_duplicate"):

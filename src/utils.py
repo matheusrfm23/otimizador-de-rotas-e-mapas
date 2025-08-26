@@ -40,3 +40,18 @@ def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> in
     distance = R * c
     return int(distance)
 
+
+import streamlit as st
+from typing import Dict
+
+def get_api_keys() -> Dict[str, str]:
+    """
+    Busca todas as chaves de API necessárias dos segredos do Streamlit
+    e as retorna em um dicionário.
+    """
+    keys = {
+        "GEMINI_API_KEY": st.secrets.get("GEMINI_API_KEY", ""),
+        "ORS_API_KEY": st.secrets.get("ORS_API_KEY", ""),
+        "AI_PASSWORD": st.secrets.get("AI_PASSWORD", "")
+    }
+    return keys
