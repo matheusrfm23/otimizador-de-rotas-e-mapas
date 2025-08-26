@@ -202,24 +202,21 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
 
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
-        # Lógica de preenchimento de coordenadas a partir do link foi aprimorada.
-        # Primeiro, tenta preencher Lat/Lon a partir de uma coluna de Link, se existir.
+        # --- Lógica de Coordenadas Aprimorada (Link é a Fonte da Verdade) ---
         if 'Link' in df_std.columns:
             # Extrai coordenadas da coluna de link.
             coords_from_link = df_std['Link'].astype(str).apply(extract_coords_from_text)
 
-            # Se as colunas Lat/Lon não existirem, cria-as.
-            if 'Latitude' not in df_std.columns:
-                df_std['Latitude'] = None
-            if 'Longitude' not in df_std.columns:
-                df_std['Longitude'] = None
+            # Se coordenadas foram extraídas, elas sobrescrevem as colunas Lat/Lon.
+            if not coords_from_link.isnull().all():
+                df_std['Latitude'] = coords_from_link.apply(lambda x: x[0] if x else None)
+                df_std['Longitude'] = coords_from_link.apply(lambda x: x[1] if x else None)
 
-            # Preenche apenas os valores ausentes de Lat/Lon com as coordenadas do link.
-            # Isso preserva as coordenadas existentes para a verificação de divergência.
-            df_std['Latitude'] = df_std['Latitude'].fillna(coords_from_link.apply(lambda x: x[0] if x else None))
-            df_std['Longitude'] = df_std['Longitude'].fillna(coords_from_link.apply(lambda x: x[1] if x else None))
+                # Após sobrescrever, não precisamos mais da verificação de divergência.
+                # A verificação de divergência só é útil se quisermos dar uma ESCOLHA ao usuário.
+                # A nova regra de negócio é que o Link tem prioridade.
 
-        # Agora, verifica se as colunas de coordenadas ainda estão ausentes.
+        # Se, após tudo, ainda não houver colunas de coordenadas, pede mapeamento manual.
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
             return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as colunas de coordenadas. Por favor, selecione-as manualmente.'}
 
@@ -228,11 +225,8 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
         if df_cleaned.empty:
             return {'status': 'error', 'message': 'Dados encontrados, mas nenhum ponto válido após a limpeza.'}
         
-        # Verifica por divergências se as colunas necessárias existem
-        if 'Link' in df_std.columns:
-            divergences = _find_divergences(df_cleaned)
-            if divergences:
-                return {'status': 'divergence_found', 'data': df_cleaned, 'divergences': divergences}
+        # A verificação de divergência foi efetivamente substituída pela lógica acima.
+        # Poderia ser reativada no futuro como uma "opção avançada".
         
         return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos processados com sucesso!'}
 
@@ -315,12 +309,9 @@ def process_drive_link(url: str) -> Dict[str, Any]:
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         if 'Link' in df_std.columns:
             coords_from_link = df_std['Link'].astype(str).apply(extract_coords_from_text)
-            if 'Latitude' not in df_std.columns:
-                df_std['Latitude'] = None
-            if 'Longitude' not in df_std.columns:
-                df_std['Longitude'] = None
-            df_std['Latitude'] = df_std['Latitude'].fillna(coords_from_link.apply(lambda x: x[0] if x else None))
-            df_std['Longitude'] = df_std['Longitude'].fillna(coords_from_link.apply(lambda x: x[1] if x else None))
+            if not coords_from_link.isnull().all():
+                df_std['Latitude'] = coords_from_link.apply(lambda x: x[0] if x else None)
+                df_std['Longitude'] = coords_from_link.apply(lambda x: x[1] if x else None)
 
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
             return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
@@ -347,26 +338,28 @@ def process_raw_text(text_data: str) -> Dict[str, Any]:
 
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
-        # Unifica a lógica de extração de coordenadas para ser consistente com outras funções de importação.
+        # Prioriza a coluna 'Link' se ela existir
         if 'Link' in df_std.columns:
             coords_from_link = df_std['Link'].astype(str).apply(extract_coords_from_text)
-            if 'Latitude' not in df_std.columns:
-                df_std['Latitude'] = None
-            if 'Longitude' not in df_std.columns:
-                df_std['Longitude'] = None
-            df_std['Latitude'] = df_std['Latitude'].fillna(coords_from_link.apply(lambda x: x[0] if x else None))
-            df_std['Longitude'] = df_std['Longitude'].fillna(coords_from_link.apply(lambda x: x[1] if x else None))
+            if not coords_from_link.isnull().all():
+                df_std['Latitude'] = coords_from_link.apply(lambda x: x[0] if x else None)
+                df_std['Longitude'] = coords_from_link.apply(lambda x: x[1] if x else None)
 
-        # Se ainda assim não houver coordenadas, tenta extrair da primeira coluna que pareça conter coordenadas.
-        if df_std['Latitude'].isnull().all() or df_std['Longitude'].isnull().all():
-             for col in df_std.columns:
+        # Se ainda não houver coordenadas, tenta extrair de outras colunas
+        if 'Latitude' not in df_std.columns or df_std['Latitude'].isnull().all():
+            for col in df_std.columns:
                 if col not in ['Latitude', 'Longitude', 'Nome', 'Link']:
                     coords_series = df_std[col].dropna().astype(str).apply(extract_coords_from_text)
-                    if coords_series.count() / len(df_std[col].dropna()) > 0.5: # Heurística: se mais da metade da coluna parece ter coordenadas
-                        coords_df = pd.DataFrame(coords_series.dropna().tolist(), index=coords_series.dropna().index, columns=['Extracted_Lat', 'Extracted_Lon'])
-                        df_std['Latitude'] = df_std['Latitude'].fillna(coords_df['Extracted_Lat'])
-                        df_std['Longitude'] = df_std['Longitude'].fillna(coords_df['Extracted_Lon'])
-                        break # Para após encontrar a primeira coluna válida
+                    if coords_series.count() / len(df_std[col].dropna()) > 0.5:
+                        df_std['Latitude'] = coords_series.apply(lambda x: x[0] if x else None)
+                        df_std['Longitude'] = coords_series.apply(lambda x: x[1] if x else None)
+                        if 'Nome' not in df_std.columns:
+                            try:
+                                name_col = [c for c in df_std.columns if c not in ['Latitude', 'Longitude', col]][0]
+                                df_std.rename(columns={name_col: 'Nome'}, inplace=True)
+                            except IndexError:
+                                df_std['Nome'] = "Ponto"
+                        break
 
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
             return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as coordenadas. Por favor, mapeie manualmente.'}
@@ -384,16 +377,42 @@ def extract_coords_from_text(text: str) -> Optional[Tuple[float, float]]:
     """
     if not isinstance(text, str): return None
     
-    text_cleaned = text.strip()
-    
-    if "maps.app.goo.gl" in text_cleaned:
+    original_text = text.strip()
+    url_to_parse = original_text
+
+    if "maps.app.goo.gl" in original_text:
         try:
-            response = requests.head(text_cleaned, allow_redirects=True, timeout=5)
-            text_cleaned = response.url
-        except requests.RequestException:
+            with requests.Session() as session:
+                response = session.head(original_text, allow_redirects=True, timeout=5)
+                url_to_parse = response.url
+        except requests.RequestException as e:
+            print(f"ERRO ao resolver o link {original_text}: {e}")
+            # Se a resolução falhar, ainda tentamos analisar o texto original
             pass
 
-    text_cleaned = re.sub(r"[°'\"()NnSsOoWwEe]", "", text_cleaned)
+    # Tenta extrair de padrões de URL do Google Maps
+    # Padrão 1: @lat,lon
+    at_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", url_to_parse)
+    if at_match:
+        lat, lon = float(at_match.group(1)), float(at_match.group(2))
+        if _validate_coordinates(lat, lon): return lat, lon
+
+    # Padrão 2: !2dlon!3dlat or !3dlat!4dlon
+    dir_match = re.findall(r"!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)|!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)", url_to_parse)
+    if dir_match:
+        for m in dir_match:
+            lat, lon = (m[2], m[3]) if m[2] else (m[1], m[0])
+            lat, lon = float(lat), float(lon)
+            if _validate_coordinates(lat, lon): return lat, lon
+
+    # Padrão 3: ?q=lat,lon
+    q_match = re.search(r"\?q=(-?\d+\.\d+),(-?\d+\.\d+)", url_to_parse)
+    if q_match:
+        lat, lon = float(q_match.group(1)), float(q_match.group(2))
+        if _validate_coordinates(lat, lon): return lat, lon
+
+    # Se nenhum padrão de URL correspondeu, tenta extrair de texto simples
+    text_cleaned = re.sub(r"[°'\"()NnSsOoWwEe]", "", original_text)
     numbers = re.findall(r"-?\d+\.\d+", text_cleaned)
     
     if len(numbers) >= 2:
