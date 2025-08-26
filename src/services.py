@@ -6,8 +6,8 @@ import requests
 import pandas as pd
 from typing import Optional, Tuple, Dict, Any, List
 
-# URL base da API. Todas as chamadas para o ORS começarão com este endereço.
-BASE_URL = "https://api.openrouteservice.org"
+# Importa as configurações centralizadas
+from src.config import ORS_BASE_URL
 
 def optimize_route_online(df: pd.DataFrame, api_key: str, start_node: int = 0, end_node: int = 0) -> Optional[Dict[str, Any]]:
     """
@@ -35,7 +35,7 @@ def optimize_route_online(df: pd.DataFrame, api_key: str, start_node: int = 0, e
         payload = {"jobs": jobs, "vehicles": vehicles}
         headers = {"Authorization": api_key, "Content-Type": "application/json"}
 
-        opt_response = requests.post(f"{BASE_URL}/optimization", json=payload, headers=headers, timeout=30)
+        opt_response = requests.post(f"{ORS_BASE_URL}/optimization", json=payload, headers=headers, timeout=30)
         opt_response.raise_for_status()
         opt_result = opt_response.json()
 
@@ -45,7 +45,7 @@ def optimize_route_online(df: pd.DataFrame, api_key: str, start_node: int = 0, e
         ordered_df = df_valid.iloc[final_route_indices].reset_index(drop=True)
 
         dir_payload = {"coordinates": ordered_df[["Longitude", "Latitude"]].values.tolist()}
-        dir_response = requests.post(f"{BASE_URL}/v2/directions/driving-car/geojson", json=dir_payload, headers=headers, timeout=30)
+        dir_response = requests.post(f"{ORS_BASE_URL}/v2/directions/driving-car/geojson", json=dir_payload, headers=headers, timeout=30)
         dir_response.raise_for_status()
         
         dir_result = dir_response.json()
@@ -74,7 +74,7 @@ def geocode_address(address: str, api_key: str) -> Optional[Tuple[float, float]]
     try:
         params = {"text": address, "size": 1}
         headers = {"Authorization": api_key}
-        response = requests.get(f"{BASE_URL}/geocode/search", headers=headers, params=params, timeout=10)
+        response = requests.get(f"{ORS_BASE_URL}/geocode/search", headers=headers, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         
@@ -105,7 +105,7 @@ def autocomplete_address(text: str, api_key: str) -> List[str]:
         }
         headers = {"Authorization": api_key}
         
-        response = requests.get(f"{BASE_URL}/geocode/autocomplete", headers=headers, params=params, timeout=5)
+        response = requests.get(f"{ORS_BASE_URL}/geocode/autocomplete", headers=headers, params=params, timeout=5)
         response.raise_for_status()
         data = response.json()
         
