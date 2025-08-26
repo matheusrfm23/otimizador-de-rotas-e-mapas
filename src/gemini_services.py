@@ -33,6 +33,11 @@ def configure_gemini(api_key: str) -> bool:
         print(f"ERRO: Falha ao configurar a API do Gemini: {e}")
         return False
 
+@st.cache_resource
+def get_gemini_model():
+    """Cria e cacheia o modelo generativo do Gemini."""
+    return genai.GenerativeModel(GEMINI_MODEL_NAME)
+
 def _call_gemini_api(prompt: str, api_key: str, retries: int = 3, delay: int = 5) -> str:
     """
     Função centralizada e robusta para chamar a API do Gemini.
@@ -41,7 +46,7 @@ def _call_gemini_api(prompt: str, api_key: str, retries: int = 3, delay: int = 5
     if not configure_gemini(api_key):
         raise ConnectionError("Falha ao configurar a API do Gemini. Verifique a chave.")
 
-    model = genai.GenerativeModel(GEMINI_MODEL_NAME)
+    model = get_gemini_model()
     
     for attempt in range(retries):
         try:
