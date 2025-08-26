@@ -21,9 +21,9 @@ from src.exporter import (
     export_to_mymaps_csv
 )
 from src.gemini_services import (
-    enrich_data_with_gemini, standardize_names_with_gemini, find_duplicates_with_gemini
+    enrich_data_with_gemini, standardize_names_with_gemini
 )
-from src.utils import get_api_keys
+from src.utils import get_api_keys, find_close_points
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -43,7 +43,9 @@ def initialize_session_state():
         "route_geojson": None, "total_distance": None, "total_duration": None,
         "address_input": "", "clear_address_input_flag": False,
         "ai_authenticated": False,
-        "api_keys": None
+        "api_keys": None,
+        "show_proximity_screen": False, # Para a nova tela de verificação de proximidade
+        "close_points_pairs": []      # Para armazenar os pares de pontos próximos
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -168,9 +170,15 @@ def draw_ai_tools_section():
                     st.session_state.processed_data = updated_df
                     st.rerun()
         with col3:
-            if st.button("Verificar Duplicatas", use_container_width=True, help="Analisa a lista em busca de pontos duplicados."):
-                 if check_ai_password():
-                    find_duplicates_with_gemini(st.session_state.processed_data, GEMINI_API_KEY)
+            if st.button("Verificar Pontos Próximos", use_container_width=True, help="Verifica se há pontos muito próximos um do outro."):
+                if not st.session_state.processed_data.empty:
+                    close_pairs = find_close_points(st.session_state.processed_data)
+                    if close_pairs:
+                        st.session_state.close_points_pairs = close_pairs
+                        st.session_state.show_proximity_screen = True
+                        st.rerun()
+                    else:
+                        st.success("Nenhum ponto próximo encontrado.")
 
 def draw_add_point_section():
     """Desenha a seção para adicionar um novo ponto à rota."""
@@ -291,9 +299,16 @@ def draw_optimization_controls():
     if not st.session_state.processed_data.empty:
         end_node = len(st.session_state.processed_data) - 1
 
-    if custom_start_end and len(st.session_state.processed_data) > 1:
-        df_data = st.session_state.processed_data
-        point_options = [f"{idx}: {row.get('Nome', f'Ponto {idx+1}')}" for idx, row in df_data.iterrows()]
+    # Prepara o DataFrame para a otimização, filtrando os pontos ignorados.
+    df_for_optimization = st.session_state.processed_data.copy()
+    if 'Ignorar' in df_for_optimization.columns:
+        df_for_optimization = df_for_optimization[df_for_optimization['Ignorar'] == False]
+
+    # É importante resetar o índice para que a seleção de start/end node funcione corretamente.
+    df_for_optimization.reset_index(drop=True, inplace=True)
+
+    if custom_start_end and len(df_for_optimization) > 1:
+        point_options = [f"{idx}: {row.get('Nome', f'Ponto {idx+1}')}" for idx, row in df_for_optimization.iterrows()]
         
         col1, col2 = st.columns(2)
         start_point_str = col1.selectbox("Ponto de Partida", options=point_options, index=0)
@@ -308,9 +323,9 @@ def draw_optimization_controls():
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Otimizar Rota (Offline)", use_container_width=True, help="Mais rápido, usa distância em linha reta."):
-            if len(st.session_state.processed_data) > 1:
+            if len(df_for_optimization) > 1:
                 with st.spinner("Otimizando rota com OR-Tools..."):
-                    optimized_df = ortools_optimizer(st.session_state.processed_data.copy(), start_node=start_node, end_node=end_node)
+                    optimized_df = ortools_optimizer(df_for_optimization.copy(), start_node=start_node, end_node=end_node)
                     st.session_state.optimized_data = add_maps_link_column(optimized_df)
                     st.session_state.route_geojson = None
                     st.session_state.total_distance = None
@@ -321,9 +336,9 @@ def draw_optimization_controls():
     
     with col2:
         if st.button("Otimizar Rota (Online)", use_container_width=True, type="primary", help="Mais preciso, usa ruas reais.", disabled=(not ORS_API_KEY)):
-            if len(st.session_state.processed_data) > 1:
+            if len(df_for_optimization) > 1:
                 with st.spinner("Otimizando rota com a API OpenRouteService..."):
-                    result = optimize_route_online(st.session_state.processed_data.copy(), ORS_API_KEY, start_node=start_node, end_node=end_node)
+                    result = optimize_route_online(df_for_optimization.copy(), ORS_API_KEY, start_node=start_node, end_node=end_node)
                     if result:
                         st.session_state.optimized_data = add_maps_link_column(result["data"])
                         st.session_state.route_geojson = result["geojson"]
@@ -494,10 +509,56 @@ def draw_divergence_resolution_screen():
             st.success("Divergências resolvidas com sucesso!")
             st.rerun()
 
+def draw_proximity_check_screen():
+    """Desenha a tela para o usuário gerenciar pontos próximos."""
+    st.header("⚠️ Verificação de Pontos Próximos")
+    st.markdown("Os seguintes pares de pontos estão muito próximos um do outro. Você pode querer ignorar um deles na otimização da rota para evitar idas e vindas desnecessárias.")
+    st.info("Marcar 'Ignorar' **não apaga** o ponto da sua lista, apenas o remove do cálculo da rota final.")
+
+    for pair in st.session_state.close_points_pairs:
+        st.warning(f"**Par Encontrado:** '{pair['point1_name']}' e '{pair['point2_name']}' estão a apenas **{pair['distance']} metros** um do outro.")
+
+    st.markdown("---")
+
+    # Adiciona a coluna 'Ignorar' se ela não existir
+    if 'Ignorar' not in st.session_state.processed_data.columns:
+        st.session_state.processed_data['Ignorar'] = False
+
+    # Usa o st.data_editor para uma tabela editável com checkboxes
+    edited_df = st.data_editor(
+        st.session_state.processed_data,
+        column_config={
+            "Ignorar": st.column_config.CheckboxColumn(
+                "Ignorar na Rota?",
+                default=False,
+            )
+        },
+        hide_index=True,
+        use_container_width=True,
+        key="proximity_editor"
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Confirmar e Voltar para a Rota", use_container_width=True, type="primary"):
+            st.session_state.processed_data = edited_df
+            st.session_state.show_proximity_screen = False
+            st.rerun()
+    with col2:
+        if st.button("Cancelar", use_container_width=True):
+            # Descarta as alterações na coluna 'Ignorar'
+            st.session_state.processed_data.drop(columns=['Ignorar'], inplace=True, errors='ignore')
+            st.session_state.show_proximity_screen = False
+            st.rerun()
+
+
 def draw_main_content():
     """Desenha o conteúdo principal da página, que muda conforme o estado."""
-    
-    if st.session_state.show_divergence_screen:
+
+    if st.session_state.show_proximity_screen:
+        draw_proximity_check_screen()
+
+    elif st.session_state.show_divergence_screen:
         draw_divergence_resolution_screen()
     
     elif st.session_state.manual_mapping_required:

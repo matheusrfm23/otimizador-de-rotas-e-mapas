@@ -55,3 +55,43 @@ def get_api_keys() -> Dict[str, str]:
         "AI_PASSWORD": st.secrets.get("AI_PASSWORD", "")
     }
     return keys
+
+
+import pandas as pd
+from typing import List
+
+def find_close_points(df: pd.DataFrame, threshold_meters: int = 100) -> List[Dict]:
+    """
+    Encontra pares de pontos em um DataFrame que estão mais próximos do que
+    um determinado limiar de distância.
+
+    Args:
+        df (pd.DataFrame): O DataFrame contendo os pontos com colunas 'Latitude' e 'Longitude'.
+        threshold_meters (int): A distância máxima em metros para considerar os pontos próximos.
+
+    Returns:
+        List[Dict]: Uma lista de dicionários, onde cada dicionário representa um par de
+                    pontos próximos e contém seus índices e nomes.
+    """
+    close_pairs = []
+    df_copy = df.reset_index() # Garante que temos um índice numérico de 0 a N-1
+
+    for i in range(len(df_copy)):
+        for j in range(i + 1, len(df_copy)):
+            point1 = df_copy.iloc[i]
+            point2 = df_copy.iloc[j]
+
+            distance = haversine_distance(
+                point1['Latitude'], point1['Longitude'],
+                point2['Latitude'], point2['Longitude']
+            )
+
+            if distance < threshold_meters:
+                close_pairs.append({
+                    "point1_index": point1['index'],
+                    "point1_name": point1.get('Nome', f"Ponto {point1['index']}"),
+                    "point2_index": point2['index'],
+                    "point2_name": point2.get('Nome', f"Ponto {point2['index']}"),
+                    "distance": distance
+                })
+    return close_pairs
