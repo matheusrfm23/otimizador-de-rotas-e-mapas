@@ -202,13 +202,24 @@ def process_uploaded_file(uploaded_file: Any) -> Dict[str, Any]:
 
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
-        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            if 'Link' in df_std.columns:
-                df_std['coords_from_link'] = df_std['Link'].astype(str).apply(extract_coords_from_text)
-                coords_df = pd.DataFrame(df_std['coords_from_link'].dropna().tolist(), index=df_std.dropna(subset=['coords_from_link']).index)
-                df_std['Latitude'] = coords_df[0]
-                df_std['Longitude'] = coords_df[1]
-        
+        # Lógica de preenchimento de coordenadas a partir do link foi aprimorada.
+        # Primeiro, tenta preencher Lat/Lon a partir de uma coluna de Link, se existir.
+        if 'Link' in df_std.columns:
+            # Extrai coordenadas da coluna de link.
+            coords_from_link = df_std['Link'].astype(str).apply(extract_coords_from_text)
+
+            # Se as colunas Lat/Lon não existirem, cria-as.
+            if 'Latitude' not in df_std.columns:
+                df_std['Latitude'] = None
+            if 'Longitude' not in df_std.columns:
+                df_std['Longitude'] = None
+
+            # Preenche apenas os valores ausentes de Lat/Lon com as coordenadas do link.
+            # Isso preserva as coordenadas existentes para a verificação de divergência.
+            df_std['Latitude'] = df_std['Latitude'].fillna(coords_from_link.apply(lambda x: x[0] if x else None))
+            df_std['Longitude'] = df_std['Longitude'].fillna(coords_from_link.apply(lambda x: x[1] if x else None))
+
+        # Agora, verifica se as colunas de coordenadas ainda estão ausentes.
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
             return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as colunas de coordenadas. Por favor, selecione-as manualmente.'}
 
@@ -302,15 +313,17 @@ def process_drive_link(url: str) -> Dict[str, Any]:
             return {'status': 'error', 'message': 'O arquivo do Drive está vazio ou em formato não reconhecido.'}
         
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
-        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            if 'Link' in df_std.columns:
-                df_std['coords_from_link'] = df_std['Link'].astype(str).apply(extract_coords_from_text)
-                coords_df = pd.DataFrame(df_std['coords_from_link'].dropna().tolist(), index=df_std.dropna(subset=['coords_from_link']).index)
-                df_std['Latitude'] = coords_df[0]
-                df_std['Longitude'] = coords_df[1]
+        if 'Link' in df_std.columns:
+            coords_from_link = df_std['Link'].astype(str).apply(extract_coords_from_text)
+            if 'Latitude' not in df_std.columns:
+                df_std['Latitude'] = None
+            if 'Longitude' not in df_std.columns:
+                df_std['Longitude'] = None
+            df_std['Latitude'] = df_std['Latitude'].fillna(coords_from_link.apply(lambda x: x[0] if x else None))
+            df_std['Longitude'] = df_std['Longitude'].fillna(coords_from_link.apply(lambda x: x[1] if x else None))
 
-            if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-                return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
+        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
+            return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Selecione as colunas de coordenadas.'}
         
         df_cleaned = clean_data(df_std)
         return {'status': 'success', 'data': df_cleaned, 'message': f'{len(df_cleaned)} pontos do Drive processados!'}
@@ -334,20 +347,27 @@ def process_raw_text(text_data: str) -> Dict[str, Any]:
 
         df_std = _auto_detect_and_standardize_columns(df_raw.copy())
         
-        if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
-            for col in df_std.columns:
-                coords_series = df_std[col].dropna().astype(str).apply(extract_coords_from_text)
-                if coords_series.count() / len(df_std[col].dropna()) > 0.5:
-                    coords_df = pd.DataFrame(coords_series.dropna().tolist(), index=coords_series.dropna().index, columns=['Latitude', 'Longitude'])
-                    df_std = df_std.join(coords_df)
-                    if 'Nome' not in df_std.columns:
-                        try:
-                            name_col = [c for c in df_std.columns if c not in ['Latitude', 'Longitude', col]][0]
-                            df_std.rename(columns={name_col: 'Nome'}, inplace=True)
-                        except IndexError:
-                            df_std['Nome'] = "Ponto"
-                    break
-        
+        # Unifica a lógica de extração de coordenadas para ser consistente com outras funções de importação.
+        if 'Link' in df_std.columns:
+            coords_from_link = df_std['Link'].astype(str).apply(extract_coords_from_text)
+            if 'Latitude' not in df_std.columns:
+                df_std['Latitude'] = None
+            if 'Longitude' not in df_std.columns:
+                df_std['Longitude'] = None
+            df_std['Latitude'] = df_std['Latitude'].fillna(coords_from_link.apply(lambda x: x[0] if x else None))
+            df_std['Longitude'] = df_std['Longitude'].fillna(coords_from_link.apply(lambda x: x[1] if x else None))
+
+        # Se ainda assim não houver coordenadas, tenta extrair da primeira coluna que pareça conter coordenadas.
+        if df_std['Latitude'].isnull().all() or df_std['Longitude'].isnull().all():
+             for col in df_std.columns:
+                if col not in ['Latitude', 'Longitude', 'Nome', 'Link']:
+                    coords_series = df_std[col].dropna().astype(str).apply(extract_coords_from_text)
+                    if coords_series.count() / len(df_std[col].dropna()) > 0.5: # Heurística: se mais da metade da coluna parece ter coordenadas
+                        coords_df = pd.DataFrame(coords_series.dropna().tolist(), index=coords_series.dropna().index, columns=['Extracted_Lat', 'Extracted_Lon'])
+                        df_std['Latitude'] = df_std['Latitude'].fillna(coords_df['Extracted_Lat'])
+                        df_std['Longitude'] = df_std['Longitude'].fillna(coords_df['Extracted_Lon'])
+                        break # Para após encontrar a primeira coluna válida
+
         if 'Latitude' not in df_std.columns or 'Longitude' not in df_std.columns:
             return {'status': 'manual_mapping_required', 'data': df_raw, 'message': 'Não foi possível detectar as coordenadas. Por favor, mapeie manualmente.'}
 
